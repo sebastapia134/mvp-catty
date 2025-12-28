@@ -247,21 +247,19 @@ body {
   transform: translateY(-50%);
   z-index: 99;
   border: none;
-  background: rgba(47, 111, 237, 0.1);
+  background: rgb(197, 216, 255);
   color: rgba(11, 27, 58, 0.9);
 
   border-radius: 999px;
   padding: 6px 10px;
 
   cursor: pointer;
-  opacity: 0.85;
   transition: transform 180ms ease, opacity 180ms ease, background 180ms ease;
 }
 
 .eyeBtn:hover {
   transform: translateY(-50%) scale(1.05);
-  opacity: 0.95;
-  background: rgba(47, 111, 237, 0.16);
+  background: rgb(197, 216, 255);
 }
 
 .passwordRow {

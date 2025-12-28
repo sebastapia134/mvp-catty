@@ -1,9 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
-
-from app.db.session import engine
+from app.db.session import engine, SessionLocal
 from app.api.router import api_router
+from app.db.seed import ensure_base_template
 
 app = FastAPI(title="Catty MVP API")
 
@@ -17,6 +17,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 app.include_router(api_router)
 

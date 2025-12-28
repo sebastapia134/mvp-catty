@@ -3,6 +3,7 @@ import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import { useContext } from "react";
 import { AuthContext } from "./context/AuthContext";
+import NewFile from "./pages/NewFile";
 
 function Protected({ children }) {
   const { token, loadingUser } = useContext(AuthContext);
@@ -23,6 +24,15 @@ export default function App() {
           </Protected>
         }
       />
+      <Route
+        path="/files/new"
+        element={
+          <Protected>
+            <NewFile />
+          </Protected>
+        }
+      />
+
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>
   );
