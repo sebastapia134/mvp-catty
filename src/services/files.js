@@ -11,3 +11,14 @@ export async function deleteFile(fileId, token) {
 export function getFile(idOrCode, token) {
   return apiFetch(`/files/${idOrCode}`, { token });
 }
+
+export async function downloadFileXlsx(fileId, token) {
+  return apiFetch(`/files/${fileId}/export.xlsx`, {
+    token,
+    responseType: "blob",
+    headers: {
+      Accept:
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    },
+  });
+}

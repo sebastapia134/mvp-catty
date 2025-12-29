@@ -2,8 +2,15 @@ import { useContext, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import styles from "../styles/Dashboard.module.css";
 import { AuthContext } from "../context/AuthContext";
-import { listFiles, deleteFile } from "../services/files";
 import { formatBytes, formatDate } from "../utils/format";
+
+import {
+  listFiles,
+  deleteFile,
+  getFile,
+  downloadFileXlsx,
+} from "../services/files";
+import { downloadJSON, downloadBlob } from "../utils/export";
 
 function ExcelIcon({ className }) {
   return (
@@ -118,6 +125,47 @@ export default function Dashboard() {
       setBusyDeleteId("");
     }
   };
+
+  const safeFilename = (s) =>
+    (s || "export")
+      .replace(/[^\w\-\. ]+/g, "_")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 120);
+
+  const handleExport = async (fileItem, e) => {
+    e.stopPropagation();
+    if (!fileItem) return;
+
+    const id = fileItem.id || fileItem.code;
+    if (!id) {
+      showToast("No se puede exportar: no hay ID/código.");
+      return;
+    }
+
+    const base = safeFilename(fileItem.name || fileItem.code || `file-${id}`);
+
+    try {
+      showToast("Exportando…");
+
+      // 1) FileOut para JSON
+      const data = await getFile(id, token);
+
+      // guardas el file_json (lo útil)
+      downloadJSON(`${base}.json`, data?.file_json ?? data);
+
+      // 2) XLSX desde backend
+      const xlsxBlob = await downloadFileXlsx(id, token);
+      downloadBlob(`${base}.xlsx`, xlsxBlob);
+
+      showToast("Exportado: JSON + Excel descargados.");
+    } catch (err) {
+      console.error("Export error:", err);
+      showToast("No se pudo exportar el archivo.");
+    }
+  };
+
+  // --- FIN handler de exportación ---
 
   return (
     <div className={styles.page}>
@@ -293,10 +341,7 @@ export default function Dashboard() {
                       <button
                         className={styles.iconBtn}
                         type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          showToast("Compartir/Exportar (pronto).");
-                        }}
+                        onClick={(e) => handleExport(f, e)}
                         title="Compartir / Exportar"
                         disabled={!!busyDeleteId}
                       >

@@ -32,10 +32,9 @@ class FileOut(BaseModel):
     share_token: str
     share_enabled: bool
 
-    file_json: Any  # 👈 necesario para renderizar la tabla en el frontend
-
+    file_json: Any  
     size_bytes: int
-    last_opened_at: Optional[datetime] = None  # 👈 opcional
+    last_opened_at: Optional[datetime] = None  
     created_at: datetime
     updated_at: datetime
 
