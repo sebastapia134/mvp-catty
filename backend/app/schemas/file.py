@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 from uuid import UUID
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 
 class FileCreateIn(BaseModel):
@@ -31,7 +31,11 @@ class FileOut(BaseModel):
     is_public: bool
     share_token: str
     share_enabled: bool
+
+    file_json: Any  # 👈 necesario para renderizar la tabla en el frontend
+
     size_bytes: int
+    last_opened_at: Optional[datetime] = None  # 👈 opcional
     created_at: datetime
     updated_at: datetime
 

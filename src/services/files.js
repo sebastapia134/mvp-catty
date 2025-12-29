@@ -7,3 +7,7 @@ export async function listFiles(token) {
 export async function deleteFile(fileId, token) {
   return apiFetch(`/files/${fileId}`, { method: "DELETE", token });
 }
+
+export function getFile(idOrCode, token) {
+  return apiFetch(`/files/${idOrCode}`, { token });
+}

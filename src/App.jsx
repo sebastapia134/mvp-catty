@@ -4,6 +4,10 @@ import Dashboard from "./pages/Dashboard";
 import { useContext } from "react";
 import { AuthContext } from "./context/AuthContext";
 import NewFile from "./pages/NewFile";
+import FileDetail from "./pages/FileDetail";
+
+// ...
+<Route path="/files/:fileId" element={<FileDetail />} />;
 
 function Protected({ children }) {
   const { token, loadingUser } = useContext(AuthContext);
@@ -29,6 +33,14 @@ export default function App() {
         element={
           <Protected>
             <NewFile />
+          </Protected>
+        }
+      />
+      <Route
+        path="/files/:fileId"
+        element={
+          <Protected>
+            <FileDetail />
           </Protected>
         }
       />

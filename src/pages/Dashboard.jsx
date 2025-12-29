@@ -44,6 +44,9 @@ export default function Dashboard() {
   const [toast, setToast] = useState("");
   const [busyDeleteId, setBusyDeleteId] = useState("");
 
+  // Modal confirmación (UI)
+  const [confirmDelete, setConfirmDelete] = useState(null); // { id, name }
+
   const showToast = (msg) => {
     setToast(msg);
     window.clearTimeout(window.__cattyToastTimer);
@@ -55,11 +58,9 @@ export default function Dashboard() {
     try {
       const data = await listFiles(token);
       setFiles(Array.isArray(data) ? data : data?.items || []);
-    } catch (e) {
+    } catch {
       setFiles([]);
-      showToast(
-        "No se pudo cargar archivos (backend /files aún no está listo)."
-      );
+      showToast("No se pudo cargar archivos.");
     } finally {
       setLoading(false);
     }
@@ -69,6 +70,16 @@ export default function Dashboard() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Cerrar modal con ESC
+  useEffect(() => {
+    if (!confirmDelete) return;
+    const onKeyDown = (e) => {
+      if (e.key === "Escape") setConfirmDelete(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmDelete]);
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
@@ -83,17 +94,26 @@ export default function Dashboard() {
   const displayName = user?.full_name || user?.email || "usuario";
   const initials = (displayName || "U").trim().slice(0, 1).toUpperCase();
 
-  const onDelete = async (fileId) => {
+  const requestDelete = (fileId, fileName) => {
     if (!fileId) return;
-    setBusyDeleteId(fileId);
+    if (busyDeleteId) return;
+    setConfirmDelete({ id: fileId, name: fileName || "Sin nombre" });
+  };
+
+  const cancelDelete = () => setConfirmDelete(null);
+
+  const confirmDeleteNow = async () => {
+    if (!confirmDelete?.id) return;
+    const { id } = confirmDelete;
+
+    setBusyDeleteId(id);
     try {
-      await deleteFile(fileId, token);
-      setFiles((prev) => prev.filter((x) => x.id !== fileId));
+      await deleteFile(id, token);
       showToast("Archivo eliminado.");
+      setConfirmDelete(null);
+      await load(); // recarga lista desde backend
     } catch {
-      showToast(
-        "No se pudo eliminar (backend DELETE /files/{id} aún no está listo)."
-      );
+      showToast("No se pudo eliminar el archivo.");
     } finally {
       setBusyDeleteId("");
     }
@@ -102,6 +122,51 @@ export default function Dashboard() {
   return (
     <div className={styles.page}>
       {toast && <div className={styles.toast}>{toast}</div>}
+
+      {/* Modal UI de confirmación */}
+      {confirmDelete && (
+        <div
+          className={styles.modalOverlay}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) cancelDelete();
+          }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirmar eliminación"
+        >
+          <div
+            className={styles.modal}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className={styles.modalTitle}>Eliminar archivo</div>
+            <div className={styles.modalText}>
+              Vas a eliminar <strong>{confirmDelete.name}</strong>. Esta acción
+              no se puede deshacer.
+            </div>
+
+            <div className={styles.modalActions}>
+              <button
+                type="button"
+                className={styles.secondaryBtn}
+                onClick={cancelDelete}
+                disabled={!!busyDeleteId}
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                className={styles.dangerBtn}
+                onClick={confirmDeleteNow}
+                disabled={!!busyDeleteId}
+                title="Eliminar definitivamente"
+              >
+                {busyDeleteId ? "Eliminando…" : "Sí, eliminar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <header className={styles.header}>
         <div className={styles.title}>mvp-catty</div>
@@ -174,6 +239,7 @@ export default function Dashboard() {
                 type="button"
                 onClick={load}
                 title="Recargar"
+                disabled={loading || !!busyDeleteId}
               >
                 ↻
               </button>
@@ -196,40 +262,65 @@ export default function Dashboard() {
             <div className={styles.empty}>No hay archivos para mostrar.</div>
           ) : (
             <div className={styles.listBody}>
-              {filtered.map((f) => (
-                <div className={styles.row} key={f.id || f.code}>
-                  <div className={styles.nameCell}>
-                    <div className={styles.fileName}>
-                      {f.name || "Sin nombre"}
+              {filtered.map((f) => {
+                const id = f.id || f.code;
+                const isBusy = busyDeleteId === f.id; // solo delete real usa f.id
+
+                return (
+                  <div className={styles.row} key={id}>
+                    <div className={styles.nameCell}>
+                      <button
+                        type="button"
+                        className={styles.fileLink}
+                        onClick={() => navigate(`/files/${id}`)}
+                        title="Abrir"
+                      >
+                        {f.name || "Sin nombre"}
+                      </button>
+                    </div>
+
+                    <div className={styles.cell}>
+                      {formatDate(f.created_at)}
+                    </div>
+                    <div className={styles.cell}>
+                      {formatDate(f.updated_at)}
+                    </div>
+                    <div className={styles.cell}>
+                      {formatBytes(f.size_bytes)}
+                    </div>
+
+                    <div className={styles.actions}>
+                      <button
+                        className={styles.iconBtn}
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          showToast("Compartir/Exportar (pronto).");
+                        }}
+                        title="Compartir / Exportar"
+                        disabled={!!busyDeleteId}
+                      >
+                        ⤴
+                      </button>
+
+                      <button
+                        className={styles.dangerBtn}
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          requestDelete(f.id, f.name);
+                        }}
+                        disabled={isBusy || !!busyDeleteId || !f.id}
+                        title={
+                          !f.id ? "No se puede eliminar sin ID" : "Eliminar"
+                        }
+                      >
+                        {isBusy ? "…" : "Eliminar"}
+                      </button>
                     </div>
                   </div>
-
-                  <div className={styles.cell}>{formatDate(f.created_at)}</div>
-                  <div className={styles.cell}>{formatDate(f.updated_at)}</div>
-                  <div className={styles.cell}>{formatBytes(f.size_bytes)}</div>
-
-                  <div className={styles.actions}>
-                    <button
-                      className={styles.iconBtn}
-                      type="button"
-                      onClick={() => showToast("Compartir/Exportar (pronto).")}
-                      title="Compartir / Exportar"
-                    >
-                      ⤴
-                    </button>
-
-                    <button
-                      className={styles.dangerBtn}
-                      type="button"
-                      onClick={() => onDelete(f.id)}
-                      disabled={busyDeleteId === f.id}
-                      title="Eliminar"
-                    >
-                      {busyDeleteId === f.id ? "…" : "Eliminar"}
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </section>

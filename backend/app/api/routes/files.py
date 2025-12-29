@@ -9,6 +9,7 @@ from app.models.file import File
 from app.models.template import Template
 from app.schemas.file import FileCreateIn, FileListOut, FileOut
 from app.core.ids import random_code, random_share_token
+from uuid import UUID
 
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -41,6 +42,39 @@ def list_files(db: Session = Depends(get_db), current_user=Depends(get_current_u
     return files
 
 
+# ✅ NUEVO: detalle para abrir /files/{id} y pintar el JSON en el front
+@router.get("/{file_id}", response_model=FileOut)
+def get_file(file_id: UUID, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    f = (
+        db.query(File)
+        .filter(File.id == file_id, File.owner_id == current_user.id)
+        .first()
+    )
+
+    # opcional: permitir admins ver cualquier file
+    if not f and getattr(current_user, "is_admin", False):
+        f = db.query(File).filter(File.id == file_id).first()
+
+    # opcional: permitir abrir por code (F-XXXXXX)
+    if not f:
+        f = (
+            db.query(File)
+            .filter(File.code == file_id, File.owner_id == current_user.id)
+            .first()
+        )
+        if not f and getattr(current_user, "is_admin", False):
+            f = db.query(File).filter(File.code == file_id).first()
+
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # si no es admin, doble check de ownership (por si lo encontraste por code)
+    if (not getattr(current_user, "is_admin", False)) and (f.owner_id != current_user.id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
+
+    return f
+
+
 @router.post("", response_model=FileOut, status_code=201)
 def create_file(payload: FileCreateIn, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     tpl = db.query(Template).filter(Template.id == payload.template_id, Template.is_active == True).first()
@@ -52,7 +86,25 @@ def create_file(payload: FileCreateIn, db: Session = Depends(get_db), current_us
         if not allowed:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Template not allowed")
 
-    base_json = copy.deepcopy(tpl.template_json)
+    def _unwrap_template_json(tj):
+        if not isinstance(tj, dict):
+            return {}
+
+        # Caso: guardaste el JSON completo del "file" en template_json -> { template:..., data:... }
+        if "template" in tj and "data" in tj and isinstance(tj["data"], dict):
+            return tj["data"]
+
+        # Caso extra: {"data": {"columns":..., "nodes":...}}  (doble wrapper)
+        if "data" in tj and isinstance(tj["data"], dict) and (
+            "columns" in tj["data"] or "nodes" in tj["data"] or "meta" in tj["data"]
+        ):
+            return tj["data"]
+
+        # Caso ideal: ya viene plano (ui/meta/columns/nodes)
+        return tj
+
+    base_json = _unwrap_template_json(copy.deepcopy(tpl.template_json))
+
     file_json = {
         "template": {"id": str(tpl.id), "code": tpl.code, "version": tpl.version},
         "data": base_json,
