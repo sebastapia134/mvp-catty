@@ -1,14 +1,12 @@
 from pydantic import BaseModel, Field
 from uuid import UUID
 from datetime import datetime
-from typing import Optional, Any
-
+from typing import Optional, Any, Dict
 
 class FileCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     template_id: UUID
     is_public: bool = False
-
 
 class FileListOut(BaseModel):
     id: UUID
@@ -21,7 +19,6 @@ class FileListOut(BaseModel):
     class Config:
         from_attributes = True
 
-
 class FileOut(BaseModel):
     id: UUID
     code: str
@@ -32,11 +29,15 @@ class FileOut(BaseModel):
     share_token: str
     share_enabled: bool
 
-    file_json: Any  
+    file_json: Any
     size_bytes: int
-    last_opened_at: Optional[datetime] = None  
+    last_opened_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
     class Config:
         from_attributes = True
+
+class FileUpdateIn(BaseModel):
+    file_json: Dict[str, Any] | None = None
+    data: Dict[str, Any] | None = None

@@ -50,7 +50,6 @@ def list_files(db: Session = Depends(get_db), current_user=Depends(get_current_u
     return files
 
 
-# ✅ NUEVO: detalle para abrir /files/{id} y pintar el JSON en el front
 @router.get("/{file_id}", response_model=FileOut)
 def get_file(file_id: UUID, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     f = (
@@ -76,7 +75,6 @@ def get_file(file_id: UUID, db: Session = Depends(get_db), current_user=Depends(
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
 
-    # si no es admin, doble check de ownership (por si lo encontraste por code)
     if (not getattr(current_user, "is_admin", False)) and (f.owner_id != current_user.id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
 
@@ -98,11 +96,9 @@ def create_file(payload: FileCreateIn, db: Session = Depends(get_db), current_us
         if not isinstance(tj, dict):
             return {}
 
-        # Caso: guardaste el JSON completo del "file" en template_json -> { template:..., data:... }
         if "template" in tj and "data" in tj and isinstance(tj["data"], dict):
             return tj["data"]
 
-        # Caso extra: {"data": {"columns":..., "nodes":...}}  (doble wrapper)
         if "data" in tj and isinstance(tj["data"], dict) and (
             "columns" in tj["data"] or "nodes" in tj["data"] or "meta" in tj["data"]
         ):
@@ -247,13 +243,11 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
 
     wb = Workbook()
 
-    # -------- Sheet: Checklist (nodes x columns) --------
     ws = wb.active
     ws.title = "Checklist"
 
     keys, headers, types = _unique_headers(columns)
     if not keys and isinstance(nodes, list) and nodes:
-        # fallback si no hay columns
         keys = list({k for r in nodes for k in (r or {}).keys()})
         headers = keys
         types = [""] * len(keys)
@@ -269,7 +263,6 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
 
-    # widths + wrap heurístico (sin hacerlo rígido)
     for idx, (k, h, t) in enumerate(zip(keys, headers, types), start=1):
         width = 14
         hlow = (h or "").lower()
@@ -289,12 +282,10 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
 
         _set_col_width(ws, idx, width)
 
-        # wrap solo en columnas largas
         if t in ("longtext",) or ("descrip" in hlow) or ("observ" in hlow) or ("justif" in hlow):
             for cell in ws[get_column_letter(idx)][1:]:
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
 
-    # -------- Sheet: Meta --------
     ws_meta = wb.create_sheet("Meta")
     ws_meta.append(["Campo", "Valor"])
     _apply_header_style(ws_meta)
@@ -324,8 +315,7 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
     for cell in ws_meta["B"][1:]:
         cell.alignment = Alignment(wrap_text=True, vertical="top")
 
-    # -------- Sheet: Questions --------
-    ws_q = wb.create_sheet("Questions")
+    ws_q = wb.create_sheet("Preguntas")
     ws_q.append(["Key", "Text"])
     _apply_header_style(ws_q)
 
@@ -338,7 +328,6 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
     for cell in ws_q["B"][1:]:
         cell.alignment = Alignment(wrap_text=True, vertical="top")
 
-    # -------- Sheet: Intro --------
     ws_i = wb.create_sheet("Intro")
     ws_i.append(["Index", "Text"])
     _apply_header_style(ws_i)
@@ -352,8 +341,7 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
     for cell in ws_i["B"][1:]:
         cell.alignment = Alignment(wrap_text=True, vertical="top")
 
-    # -------- Sheet: Columns --------
-    ws_c = wb.create_sheet("Columns")
+    ws_c = wb.create_sheet("Columnas")
     ws_c.append(["key", "label", "type"])
     _apply_header_style(ws_c)
 
@@ -364,7 +352,6 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
     ws_c.column_dimensions["B"].width = 70
     ws_c.column_dimensions["C"].width = 18
 
-    # write bytes
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -388,3 +375,40 @@ def export_file_xlsx(file_id: str, db: Session = Depends(get_db), current_user=D
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=headers,
     )
+
+
+@router.patch("/{file_id}", response_model=FileOut)
+def update_file(
+    file_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Actualiza file.file_json (reemplaza) y recalcula size_bytes.
+    Espera payload con 'file_json' (objeto) OR 'data' (obj para poner en file_json = {'data': ...}).
+    """
+    f = _resolve_file(db, current_user, file_id)
+
+    # Determinar nuevo file_json
+    new_file_json = None
+    if isinstance(payload, dict) and "file_json" in payload:
+        new_file_json = payload["file_json"]
+    elif isinstance(payload, dict) and "data" in payload:
+        new_file_json = {"data": payload["data"]}
+    else:
+        raise HTTPException(status_code=400, detail="Payload inválido. Envía 'file_json' o 'data'.")
+
+    # Guardamos
+    try:
+        raw = json.dumps(new_file_json, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        size_bytes = len(raw)
+    except Exception:
+        raise HTTPException(status_code=400, detail="No se pudo serializar JSON.")
+
+    f.file_json = new_file_json
+    f.size_bytes = size_bytes
+    db.add(f)
+    db.commit()
+    db.refresh(f)
+    return f

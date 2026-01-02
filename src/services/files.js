@@ -22,3 +22,11 @@ export async function downloadFileXlsx(fileId, token) {
     },
   });
 }
+
+export async function updateFile(fileIdOrCode, payload, token) {
+  return apiFetch(`/files/${fileIdOrCode}`, {
+    method: "PATCH",
+    body: payload,
+    token,
+  });
+}
