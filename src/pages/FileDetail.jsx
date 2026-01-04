@@ -22,6 +22,21 @@ const DEFAULT_SCALES = {
   ],
 };
 
+// Convierte a número si es posible; devuelve null si no es numérico.
+function toNumericOrNull(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Normaliza un nodo para que sus IDs sean numéricos.
+function normalizeNodeIds(node, nextId) {
+  const maybeId = toNumericOrNull(node.id);
+  const id = maybeId ?? nextId();
+  const p = toNumericOrNull(node.parentId);
+  const parentId = p === 0 ? null : p;
+  return { ...node, id, parentId };
+}
+
 function uuid() {
   try {
     return (
@@ -1114,6 +1129,7 @@ export default function FileDetail() {
   const [columns, setColumns] = useState([]);
   const [nodes, setNodes] = useState([]);
   const [ui, setUi] = useState({ showMeta: true });
+  const nextIdRef = useRef(1); // generador incremental de IDs numéricos
 
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState("");
@@ -1196,10 +1212,23 @@ export default function FileDetail() {
     setIntro(Array.isArray(i) ? i : []);
     setQuestions(q || {});
     setScales(sc || DEFAULT_SCALES);
-    setColumns(Array.isArray(cols) ? cols : []);
-    setNodes(Array.isArray(nds) ? nds : []);
-    setUi(u || { showMeta: true });
 
+    // columnas
+    setColumns(Array.isArray(cols) ? cols : []);
+
+    // nodos: normaliza IDs a numéricos y ajusta el contador
+    let counter = 1;
+    const normalizedNodes = (Array.isArray(nds) ? nds : []).map((n) =>
+      normalizeNodeIds(n, () => counter++)
+    );
+    const maxId = normalizedNodes.reduce(
+      (m, n) => (Number.isFinite(n.id) ? Math.max(m, n.id) : m),
+      0
+    );
+    nextIdRef.current = Math.max(maxId + 1, counter);
+    setNodes(normalizedNodes);
+
+    setUi(u || { showMeta: true });
     setSelectedId(sel || null);
     setDirty(false);
 
@@ -1212,7 +1241,6 @@ export default function FileDetail() {
       );
     }
   }, [file]);
-
   // Selected node
   const selectedNode = useMemo(
     () => nodes.find((n) => n.id === selectedId) || null,
@@ -1323,7 +1351,7 @@ export default function FileDetail() {
     }
 
     const node = {
-      id: uuid(),
+      id: nextIdRef.current++,
       type,
       code: "",
       title: "",
@@ -1346,7 +1374,7 @@ export default function FileDetail() {
   function duplicateSelected() {
     if (!selectedNode) return;
     const copy = deepClone(selectedNode);
-    copy.id = uuid();
+    copy.id = nextIdRef.current++;
     copy.code = copy.code ? `${copy.code}_copy` : "";
     copy.title = copy.title ? `${copy.title} (copia)` : "";
     copy.order = nextOrderForParent(copy.parentId);
@@ -1530,6 +1558,9 @@ export default function FileDetail() {
         })),
         nodes: (nodes || []).map((n) => ({
           ...n,
+          id: toNumericOrNull(n.id) ?? n.id, // fuerza numérico si aplica
+          parentId:
+            n.parentId == null ? null : toNumericOrNull(n.parentId) ?? null,
           custom: n.custom || {},
         })),
       };
@@ -1556,7 +1587,13 @@ export default function FileDetail() {
       scales: scales || DEFAULT_SCALES,
       ui: ui || { showMeta: true },
       columns,
-      nodes,
+      nodes: (nodes || []).map((n) => ({
+        ...n,
+        id: toNumericOrNull(n.id) ?? n.id,
+        parentId:
+          n.parentId == null ? null : toNumericOrNull(n.parentId) ?? null,
+        custom: n.custom || {},
+      })),
     };
 
     downloadJSON(`${safeFilename(file?.name || "checklist")}.json`, {
@@ -1566,8 +1603,30 @@ export default function FileDetail() {
   }
 
   // Export Excel (backend)
+  // Reemplaza la función handleExportExcel existente por esta versión.
   async function handleExportExcel() {
     try {
+      // Si hay cambios locales, intenta guardarlos antes de exportar
+      if (dirty) {
+        setStatus("warn", "Guardando cambios antes de exportar…");
+
+        // Llama a handleSave (que hace validate() y guarda). Esperamos su fin.
+        try {
+          await handleSave();
+        } catch (err) {
+          // handleSave maneja errores y setea status; aquí no hacemos más.
+        }
+
+        // Si sigue habiendo cambios (dirty === true) abortamos la exportación.
+        if (dirty) {
+          setStatus(
+            "bad",
+            "Exportación cancelada: primero corrige los errores y guarda los cambios."
+          );
+          return;
+        }
+      }
+
       setStatus("warn", "Exportando Excel…");
       const blob = await downloadFileXlsx(fileId, token);
       const url = URL.createObjectURL(blob);
