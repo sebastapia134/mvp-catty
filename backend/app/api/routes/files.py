@@ -13,8 +13,7 @@ from uuid import UUID
 
 import io
 import re
-from uuid import UUID
-
+import unicodedata
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill
@@ -48,37 +47,6 @@ def list_files(db: Session = Depends(get_db), current_user=Depends(get_current_u
         .all()
     )
     return files
-
-
-@router.get("/{file_id}", response_model=FileOut)
-def get_file(file_id: UUID, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
-    f = (
-        db.query(File)
-        .filter(File.id == file_id, File.owner_id == current_user.id)
-        .first()
-    )
-
-    # opcional: permitir admins ver cualquier file
-    if not f and getattr(current_user, "is_admin", False):
-        f = db.query(File).filter(File.id == file_id).first()
-
-    # opcional: permitir abrir por code (F-XXXXXX)
-    if not f:
-        f = (
-            db.query(File)
-            .filter(File.code == file_id, File.owner_id == current_user.id)
-            .first()
-        )
-        if not f and getattr(current_user, "is_admin", False):
-            f = db.query(File).filter(File.code == file_id).first()
-
-    if not f:
-        raise HTTPException(status_code=404, detail="File not found")
-
-    if (not getattr(current_user, "is_admin", False)) and (f.owner_id != current_user.id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
-
-    return f
 
 
 @router.post("", response_model=FileOut, status_code=201)
@@ -185,9 +153,11 @@ def _resolve_file(db: Session, current_user, file_id: str) -> File:
     return f
 
 
+# Mantén UNA sola definición de get_file que delega en _resolve_file
 @router.get("/{file_id}", response_model=FileOut)
 def get_file(file_id: str, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     return _resolve_file(db, current_user, file_id)
+
 
 def _safe_filename(name: str) -> str:
     name = (name or "export").strip()
@@ -230,6 +200,7 @@ def _set_col_width(ws, col_idx: int, width: float):
     ws.column_dimensions[get_column_letter(col_idx)].width = width
 
 
+# (Reemplaza la función _build_file_xlsx en tu files.py por este bloque)
 def _build_file_xlsx(f: File) -> io.BytesIO:
     file_json = f.file_json or {}
     data = (file_json.get("data") or {}) if isinstance(file_json, dict) else {}
@@ -247,18 +218,208 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
     ws.title = "Checklist"
 
     keys, headers, types = _unique_headers(columns)
-    if not keys and isinstance(nodes, list) and nodes:
-        keys = list({k for r in nodes for k in (r or {}).keys()})
+
+    # Si no vienen columnas definidas, inferimos keys de forma determinista
+    # y también incluimos las keys dentro de cada nodo.custom
+    if (not keys) and isinstance(nodes, list) and nodes:
+        seen = []
+        seen_set = set()
+
+        # Prioriza campos comunes en orden útil
+        preferred = ["id", "code", "title", "type", "parentId", "viKey", "vcKey", "weight", "required", "active", "order"]
+
+        # Recolecta todas las keys (incluye custom) manteniendo determinismo:
+        for r in nodes:
+            if not isinstance(r, dict):
+                continue
+            # top-level keys
+            for k in r.keys():
+                if k == "custom":
+                    continue
+                kk = str(k)
+                if kk not in seen_set:
+                    seen.append(kk)
+                    seen_set.add(kk)
+            # custom keys
+            custom = r.get("custom") or {}
+            if isinstance(custom, dict):
+                for k in custom.keys():
+                    kk = str(k)
+                    if kk not in seen_set:
+                        seen.append(kk)
+                        seen_set.add(kk)
+
+        # Ordena: preferred primero si existen, luego el resto en el orden observado
+        ordered = []
+        for p in preferred:
+            if p in seen_set and p not in ordered:
+                ordered.append(p)
+        for s in seen:
+            if s not in ordered:
+                ordered.append(s)
+
+        keys = ordered
         headers = keys
         types = [""] * len(keys)
 
+    # Escribe encabezados y aplica estilo
     ws.append(headers)
     _apply_header_style(ws)
 
+    # Para cada nodo, construye un mapa plano que combine top-level + custom,
+    # y hace lookup tolerante (case-insensitive + normalizado)
     if isinstance(nodes, list):
+        # helper para normalizar nombres de clave (quita acentos y caracteres no ascii, lower)
+        def norm_str(s):
+            if s is None:
+                return ""
+            s = str(s)
+            nk = unicodedata.normalize("NFD", s)
+            nk = nk.encode("ascii", "ignore").decode("ascii")
+            nk = re.sub(r"\s+", "", nk).lower()
+            nk = re.sub(r"[^a-z0-9_]", "", nk)  # conservamos guiones bajos por si acaso
+            return nk
+
+        # construir filas
+        # Creamos varios índices de búsqueda para cada nodo: exacto, lower, upper, normalizado
         for r in nodes:
             r = r or {}
-            ws.append([r.get(k, "") for k in keys])
+            custom = r.get("custom") or {}
+
+            # construir flat: top-level first, luego custom (custom sobrescribe)
+            flat = {}
+            if isinstance(r, dict):
+                for kk, vv in r.items():
+                    if kk == "custom":
+                        continue
+                    # siempre convertir la key a str para evitar keys no-string
+                    flat[str(kk)] = vv
+            if isinstance(custom, dict):
+                for kk, vv in custom.items():
+                    flat[str(kk)] = vv
+
+            # índices auxiliares
+            flat_exact = {str(k): v for k, v in flat.items()}
+            flat_lower = {str(k).lower(): v for k, v in flat.items()}
+            flat_upper = {str(k).upper(): v for k, v in flat.items()}
+            flat_norm = {norm_str(k): v for k, v in flat.items()}
+
+            # también guardamos list of present normalized keys (por heurísticos)
+            present_norm_keys = set(flat_norm.keys())
+
+            row = []
+            for colk in keys:
+                val = None
+
+                # prepare candidates (formas a probar)
+                c0 = str(colk or "")
+                cand_list = [c0, c0.lower(), c0.upper(), norm_str(c0)]
+
+                # heurísticos adicionales: para claves numéricas, probar versiones sin/ con ceros, y si la columna suena a 'agrup' probar variaciones
+                nk = norm_str(c0)
+                if nk and ("agrup" in nk or "agrupa" in nk or "agr" in nk):
+                    # posibles campos en nodos que contienen agrupación
+                    cand_list += ["agrupacion", "agrupacion_es", "agrupacion_en", "agrupación", "agrupación_es", "agrupación_en"]
+                if nk and nk.isdigit():
+                    cand_list += [nk]  # ya incluido; es para claridad
+
+                # probar candidatos en orden: exacto en flat, luego lower/upper/norm
+                for c in cand_list:
+                    if c in flat_exact:
+                        val = flat_exact[c]
+                        break
+                    if c in flat_lower:
+                        val = flat_lower[c]
+                        break
+                    if c in flat_upper:
+                        val = flat_upper[c]
+                        break
+                    if c in flat_norm:
+                        val = flat_norm[c]
+                        break
+
+                # caso especial: si buscamos parent code (columna puede llamarse PARENT_CODE o parentCode)
+                if val is None and "parent" in nk:
+                    # intentar resolver por parentId -> buscar nodo padre y obtener su code
+                    pid = r.get("parentId") or r.get("parent") or None
+                    if pid:
+                        # pid puede ser uuid o número; buscamos en list nodes por id
+                        parent_node = None
+                        for p in nodes:
+                            try:
+                                if str(p.get("id")) == str(pid):
+                                    parent_node = p
+                                    break
+                            except Exception:
+                                continue
+                        if parent_node:
+                            val = parent_node.get("code") or parent_node.get("codigo") or ""
+
+                # vi/vc label mapping: si columna sugiere "vi_label" o "vc_label" y el valor es clave tipo "VI_3" mapear a label si scales existen
+                if isinstance(val, str) and val and (("vi" in nk and "label" in nk) or nk == "vilabel"):
+                    try:
+                        for s in (data.get("scales") or {}).get("VI", []) or []:
+                            if s.get("key") == val:
+                                val = s.get("label") or val
+                                break
+                    except Exception:
+                        pass
+                if isinstance(val, str) and val and (("vc" in nk and "label" in nk) or nk == "vclabel"):
+                    try:
+                        for s in (data.get("scales") or {}).get("VC", []) or []:
+                            if s.get("key") == val:
+                                val = s.get("label") or val
+                                break
+                    except Exception:
+                        pass
+
+                # fallback: si ninguna coincidencia, intentar usar propiedades estándar
+                if val is None:
+                    # common names
+                    std_map = {
+                        "id": r.get("id"),
+                        "code": r.get("code") or r.get("codigo"),
+                        "title": r.get("title") or r.get("titulo") or r.get("name"),
+                        "desc": r.get("desc") or r.get("descripcion") or r.get("observaciones"),
+                        "type": r.get("type"),
+                        "vikey": r.get("viKey") or r.get("vi"),
+                        "vckey": r.get("vcKey") or r.get("vc"),
+                        "weight": r.get("weight"),
+                        "required": r.get("required"),
+                        "active": r.get("active"),
+                        "order": r.get("order"),
+                    }
+                    # probar algunas claves comunes basadas en colk normalizado
+                    if nk in ("id", "codigo", "code", "cod"):
+                        val = std_map.get("id") if nk == "id" else std_map.get("code")
+                    elif "title" in nk or "enunci" in nk or "nombre" in nk:
+                        val = std_map.get("title")
+                    elif "desc" in nk or "observ" in nk or "descrip" in nk:
+                        val = std_map.get("desc")
+                    elif "vi" in nk and "label" not in nk:
+                        val = std_map.get("vikey")
+                    elif "vc" in nk and "label" not in nk:
+                        val = std_map.get("vckey")
+                    # si sigue None, ponemos cadena vacía abajo
+
+                # default a cadena vacía si todavía None
+                if val is None:
+                    val = ""
+
+                # serializar dict/list para que openpyxl no falle
+                if isinstance(val, (dict, list)):
+                    try:
+                        val = json.dumps(val, ensure_ascii=False)
+                    except Exception:
+                        val = str(val)
+
+                row.append(val)
+
+            # asegurar longitud
+            if len(row) != len(keys):
+                row = row[: len(keys)] + [""] * max(0, len(keys) - len(row))
+
+            ws.append(row)
 
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
@@ -357,7 +518,6 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
     buf.seek(0)
     return buf
 
-
 @router.get("/{file_id}/export.xlsx")
 def export_file_xlsx(file_id: str, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     f = _resolve_file(db, current_user, file_id)
@@ -375,7 +535,6 @@ def export_file_xlsx(file_id: str, db: Session = Depends(get_db), current_user=D
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=headers,
     )
-
 
 @router.patch("/{file_id}", response_model=FileOut)
 def update_file(
