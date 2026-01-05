@@ -574,7 +574,6 @@ function ColumnsModal({
                   }
                 >
                   <option value="ALL">ALL</option>
-                  <option value="LEVEL">LEVEL</option>
                   <option value="GROUP">GROUP</option>
                   <option value="ITEM">ITEM</option>
                 </select>
@@ -2366,7 +2365,6 @@ export default function FileDetail() {
                             }
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <option value={TYPES.LEVEL}>LEVEL</option>
                             <option value={TYPES.GROUP}>GROUP</option>
                             <option value={TYPES.ITEM}>ITEM</option>
                           </select>

@@ -777,27 +777,16 @@ textarea.cellInput {
   color-scheme: dark;
 }
 
-/* 2) Fuerza color legible para el select cerrado y sus hijos (fallback) */
 .cellSelect,
 .cellSelect * {
   color: var(--text) !important;
 }
 
-/* 3) Intento de estilizar las <option> (algunos navegadores lo respetan) */
 .cellSelect option {
   color: var(--text) !important;
   background-color: var(--panel) !important;
   -webkit-text-fill-color: var(--text) !important; /* ayuda en WebKit/Safari */
 }
-
-/* 4) Medida alternativa (si ves texto pálido en plataformas que obligan fondo blanco nativo)
-   descomenta y ajusta si prefieres que las opciones nativas muestren texto oscuro sobre fondo blanco:
-
-.cellSelect option {
-  color: #0b1220 !important;   / * texto oscuro para dropdowns nativos blancos * /
-  background-color: #ffffff !important;
-}
-*/
 
 /* --- end fix --- */
 select {
