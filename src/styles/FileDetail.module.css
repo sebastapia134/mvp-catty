@@ -419,6 +419,8 @@ body {
   border-radius: 16px;
   padding: 12px;
   background: rgba(255, 255, 255, 0.02);
+  overflow-y: scroll;
+  max-height: 200px;
 }
 .metaIntro {
   margin-bottom: 10px;
