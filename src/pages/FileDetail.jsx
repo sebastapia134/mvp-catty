@@ -39,10 +39,32 @@ function toNumericOrNull(raw) {
 // Normaliza un nodo para que sus IDs sean numéricos.
 function normalizeNodeIds(node, nextId) {
   const maybeId = toNumericOrNull(node.id);
-  const id = maybeId ?? nextId();
+  // Si node.id es numérico lo usamos como number; si no, conservamos el id string (si existe)
+  const id = maybeId !== null ? maybeId : node.id ?? nextId();
+
+  // parentId: si es numérico lo ponemos como number (y 0 => null),
+  // si no es numérico lo conservamos (puede ser código o uuid).
   const p = toNumericOrNull(node.parentId);
-  const parentId = p === 0 ? null : p;
+  let parentId;
+  if (p !== null) {
+    parentId = p === 0 ? null : p;
+  } else {
+    parentId = node.parentId ?? null;
+  }
+
   return { ...node, id, parentId };
+}
+
+// Resuelve un valor de input (p.ej. value de <select>) al id real del nodo
+// devolviendo el id con el tipo correcto (number o string), o null.
+function resolveParentInput(input) {
+  if (input == null || input === "") return null;
+  // buscar nodo con id coincidente (String)
+  const found = nodes.find((n) => String(n.id) === String(input));
+  if (found) return found.id;
+  // fallback: si input es numérico, devolver número
+  const maybe = toNumericOrNull(input);
+  return maybe !== null ? maybe : input;
 }
 
 function uuid() {
@@ -78,7 +100,7 @@ const TreeNode = memo(function TreeNode({
   selectedId,
   onSelect,
 }) {
-  const kids = byParent.get(node.id) || [];
+  const kids = byParent.get(String(node.id)) || [];
   const selected = node.id === selectedId;
 
   return (
@@ -1536,7 +1558,7 @@ export default function FileDetail() {
   const byParent = useMemo(() => {
     const map = new Map();
     for (const n of nodes) {
-      const pid = n.parentId || "__root__";
+      const pid = n.parentId == null ? "__root__" : String(n.parentId);
       if (!map.has(pid)) map.set(pid, []);
       map.get(pid).push(n);
     }
@@ -1580,27 +1602,32 @@ export default function FileDetail() {
   }, [sortedNodes, deferredSearch]);
 
   function siblingsOf(node) {
-    const pid = node?.parentId || "__root__";
+    const pid = node?.parentId == null ? "__root__" : String(node.parentId);
     return nodes
-      .filter((n) => (n.parentId || "__root__") === pid)
+      .filter(
+        (n) => (n.parentId == null ? "__root__" : String(n.parentId)) === pid
+      )
       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   }
   function nextOrderForParent(parentId) {
-    const pid = parentId || "__root__";
-    const sibs = nodes.filter((n) => (n.parentId || "__root__") === pid);
+    const pid = parentId == null ? "__root__" : String(parentId);
+    const sibs = nodes.filter(
+      (n) => (n.parentId == null ? "__root__" : String(n.parentId)) === pid
+    );
     const max = sibs.reduce((m, n) => Math.max(m, Number(n.order || 0)), 0);
     return max + 10;
   }
 
   function isDescendant(nodeId, candidateParentId) {
     if (!candidateParentId) return false;
-    const lookup = new Map(nodes.map((r) => [r.id, r]));
-    let cur = candidateParentId;
+    const lookup = new Map(nodes.map((r) => [String(r.id), r]));
+    let cur = String(candidateParentId);
+    const target = String(nodeId);
     while (cur) {
-      if (cur === nodeId) return true;
+      if (cur === target) return true;
       const n = lookup.get(cur);
       if (!n) break;
-      cur = n.parentId;
+      cur = n.parentId == null ? null : String(n.parentId);
     }
     return false;
   }
@@ -1664,11 +1691,12 @@ export default function FileDetail() {
     const stack = [id];
     while (stack.length) {
       const cur = stack.pop();
-      toDelete.add(cur);
-      for (const ch of nodes) if (ch.parentId === cur) stack.push(ch.id);
+      toDelete.add(String(cur));
+      for (const ch of nodes)
+        if (String(ch.parentId) === String(cur)) stack.push(ch.id);
     }
-    setNodes((prev) => prev.filter((n) => !toDelete.has(n.id)));
-    if (selectedId && toDelete.has(selectedId)) setSelectedId(null);
+    setNodes((prev) => prev.filter((n) => !toDelete.has(String(n.id))));
+    if (selectedId && toDelete.has(String(selectedId))) setSelectedId(null);
     markDirty("Nodo eliminado.");
   }
 
@@ -1715,13 +1743,13 @@ export default function FileDetail() {
     markDirty("Orden actualizado.");
   }
 
-  function setParent(id, parentId) {
+  function setParent(id, parentIdInput) {
     const node = nodes.find((n) => n.id === id);
     if (!node) return;
 
-    const pid = parentId || null;
+    const pid = resolveParentInput(parentIdInput);
 
-    if (pid === id) {
+    if (String(pid) === String(id)) {
       setStatus("bad", "No puedes asignar el mismo nodo como padre.");
       return;
     }
@@ -1739,7 +1767,6 @@ export default function FileDetail() {
       "Padre actualizado."
     );
   }
-
   // Meta toggle
   function toggleMeta() {
     setUi((p) => ({ ...p, showMeta: !p.showMeta }));
@@ -1923,8 +1950,9 @@ export default function FileDetail() {
   function applyInspector() {
     if (!draft || !selectedNode) return;
 
-    const newParentId = draft.parentId || null;
-    if (newParentId === selectedNode.id) {
+    const newParentId = resolveParentInput(draft.parentId);
+
+    if (String(newParentId) === String(selectedNode.id)) {
       setStatus("bad", "No puedes asignar el mismo nodo como padre.");
       return;
     }
@@ -1939,7 +1967,8 @@ export default function FileDetail() {
     setNodes((prev) =>
       prev.map((n) => {
         if (n.id !== selectedNode.id) return n;
-        const parentChanged = (n.parentId || "") !== (newParentId || "");
+        const parentChanged =
+          String(n.parentId || "") !== String(newParentId || "");
         return {
           ...n,
           type: draft.type,
