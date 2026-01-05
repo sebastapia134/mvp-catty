@@ -57,15 +57,6 @@ function normalizeNodeIds(node, nextId) {
 
 // Resuelve un valor de input (p.ej. value de <select>) al id real del nodo
 // devolviendo el id con el tipo correcto (number o string), o null.
-function resolveParentInput(input) {
-  if (input == null || input === "") return null;
-  // buscar nodo con id coincidente (String)
-  const found = nodes.find((n) => String(n.id) === String(input));
-  if (found) return found.id;
-  // fallback: si input es numérico, devolver número
-  const maybe = toNumericOrNull(input);
-  return maybe !== null ? maybe : input;
-}
 
 function uuid() {
   try {
@@ -1444,6 +1435,15 @@ export default function FileDetail() {
     setStatusMsg(msg || "—");
   }
 
+  function resolveParentInput(input) {
+    if (input == null || input === "") return null;
+    // buscar nodo con id coincidente (String)
+    const found = nodes.find((n) => String(n.id) === String(input));
+    if (found) return found.id;
+    // fallback: si input es numérico, devolver número
+    const maybe = toNumericOrNull(input);
+    return maybe !== null ? maybe : input;
+  }
   function markDirty(msg) {
     setDirty(true);
     if (msg) setStatus("warn", msg);
