@@ -1313,6 +1313,7 @@ function editedToOriginal(edited, options = {}) {
   );
 
   // nodes: mapear cada nodo al esquema original
+  // nodes: mapear cada nodo al esquema original
   const nodesOut = (Array.isArray(edited.nodes) ? edited.nodes : []).map(
     (n) => {
       const idOut = toNumericOrNull(n.id) ?? n.id;
@@ -1350,6 +1351,12 @@ function editedToOriginal(edited, options = {}) {
         findField(n, ["nivel_importancia", "nivel_importancia"]) ??
         null;
 
+      // --- NUEVO: preservar referencia al padre al exportar ---
+      // si parentId es numérico sacamos número, si no lo dejamos como string (uuid o código)
+      const rawParent = n.parentId ?? n.parent ?? null;
+      const parentOut =
+        rawParent == null ? null : toNumericOrNull(rawParent) ?? rawParent;
+
       return {
         id: idOut,
         1: p1,
@@ -1365,6 +1372,10 @@ function editedToOriginal(edited, options = {}) {
         observaciones: observaciones ?? null,
         nivel_aplicacion: nivel_aplicacion ?? null,
         nivel_importancia: nivel_importancia ?? null,
+
+        // exportar referencia al padre para no perder jerarquía
+        parentId: parentOut,
+        parent: parentOut,
       };
     }
   );
