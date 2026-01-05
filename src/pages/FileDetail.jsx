@@ -1,4 +1,12 @@
-import { useContext, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useContext,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import styles from "../styles/FileDetail.module.css";
 import { AuthContext } from "../context/AuthContext";
@@ -63,6 +71,57 @@ function normalizeKey(s) {
 function nodeLabel(n) {
   return `${n?.code ? `${n.code} — ` : ""}${n?.title || "(sin título)"}`;
 }
+
+const TreeNode = memo(function TreeNode({
+  node,
+  byParent,
+  selectedId,
+  onSelect,
+}) {
+  const kids = byParent.get(node.id) || [];
+  const selected = node.id === selectedId;
+
+  return (
+    <li>
+      <div
+        className={`${styles.treeItem} ${
+          selected ? styles.treeItemSelected : ""
+        }`}
+        onClick={() => onSelect(node.id)}
+        role="button"
+        tabIndex={0}
+      >
+        <span
+          className={`${styles.tag} ${
+            node.type === TYPES.LEVEL
+              ? styles.tagLevel
+              : node.type === TYPES.GROUP
+              ? styles.tagGroup
+              : styles.tagItem
+          }`}
+        >
+          {node.type}
+        </span>
+        <div className={styles.treeText}>{nodeLabel(node)}</div>
+      </div>
+
+      {kids.length > 0 ? (
+        <ul className={`${styles.tree} ${styles.indent}`}>
+          {kids.map((ch) => (
+            <TreeNode
+              key={ch.id}
+              node={ch}
+              byParent={byParent}
+              selectedId={selectedId}
+              onSelect={onSelect}
+            />
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  );
+});
+
 function safeFilename(name) {
   return String(name || "file").replace(/[^a-z0-9_\-\.]/gi, "_");
 }
@@ -1490,24 +1549,36 @@ export default function FileDetail() {
   const roots = useMemo(() => byParent.get("__root__") || [], [byParent]);
 
   // Filtered table rows
-  const filteredRows = useMemo(() => {
-    const q = String(search || "")
-      .trim()
-      .toLowerCase();
-    const rows = nodes.filter((n) => {
-      if (!q) return true;
-      const blob = `${n.code} ${n.title} ${n.type}`.toLowerCase();
-      return blob.includes(q);
-    });
+  const deferredSearch = useDeferredValue(search);
 
-    return rows.sort((a, b) => {
+  // O(1) lookup for parent labels (stringify to avoid id-type mismatches)
+  const nodesById = useMemo(() => {
+    const m = new Map();
+    for (const n of nodes) m.set(String(n.id), n);
+    return m;
+  }, [nodes]);
+
+  const sortedNodes = useMemo(() => {
+    const arr = [...nodes];
+    arr.sort((a, b) => {
       const pa = String(a.parentId ?? "");
       const pb = String(b.parentId ?? "");
       if (pa !== pb) return pa.localeCompare(pb);
-
       return (a.order ?? 0) - (b.order ?? 0);
     });
-  }, [nodes, search]);
+    return arr;
+  }, [nodes]);
+
+  const filteredRows = useMemo(() => {
+    const q = String(deferredSearch || "")
+      .trim()
+      .toLowerCase();
+    if (!q) return sortedNodes;
+    return sortedNodes.filter((n) => {
+      const blob = `${n.code} ${n.title} ${n.type}`.toLowerCase();
+      return blob.includes(q);
+    });
+  }, [sortedNodes, deferredSearch]);
 
   function siblingsOf(node) {
     const pid = node?.parentId || "__root__";
@@ -1952,44 +2023,6 @@ export default function FileDetail() {
   }, [nodes]);
 
   // Render tree recursively
-  function TreeNode({ node }) {
-    const kids = byParent.get(node.id) || [];
-    const selected = node.id === selectedId;
-
-    return (
-      <li>
-        <div
-          className={`${styles.treeItem} ${
-            selected ? styles.treeItemSelected : ""
-          }`}
-          onClick={() => setSelected(node.id)}
-          role="button"
-          tabIndex={0}
-        >
-          <span
-            className={`${styles.tag} ${
-              node.type === TYPES.LEVEL
-                ? styles.tagLevel
-                : node.type === TYPES.GROUP
-                ? styles.tagGroup
-                : styles.tagItem
-            }`}
-          >
-            {node.type}
-          </span>
-          <div className={styles.treeText}>{nodeLabel(node)}</div>
-        </div>
-
-        {kids.length > 0 ? (
-          <ul className={`${styles.tree} ${styles.indent}`}>
-            {kids.map((ch) => (
-              <TreeNode key={ch.id} node={ch} />
-            ))}
-          </ul>
-        ) : null}
-      </li>
-    );
-  }
 
   const selectionPill = selectedNode
     ? `Selección: ${nodeLabel(selectedNode)}`
@@ -2120,7 +2153,13 @@ export default function FileDetail() {
             ) : (
               <ul className={styles.tree}>
                 {roots.map((n) => (
-                  <TreeNode key={n.id} node={n} />
+                  <TreeNode
+                    key={n.id}
+                    node={n}
+                    byParent={byParent}
+                    selectedId={selectedId}
+                    onSelect={setSelectedId}
+                  />
                 ))}
               </ul>
             )}
@@ -2264,7 +2303,7 @@ export default function FileDetail() {
                 {filteredRows.map((n) => {
                   const isSel = n.id === selectedId;
                   const parent = n.parentId
-                    ? nodes.find((x) => x.id === n.parentId)
+                    ? nodesById.get(String(n.parentId))
                     : null;
 
                   return (
@@ -2275,77 +2314,101 @@ export default function FileDetail() {
                     >
                       {/* CODE */}
                       <td>
-                        <input
-                          className={styles.cellInput}
-                          value={n.code || ""}
-                          placeholder="Código"
-                          onChange={(e) =>
-                            updateNode(
-                              n.id,
-                              { code: e.target.value },
-                              undefined
-                            )
-                          }
-                          onClick={(e) => e.stopPropagation()}
-                        />
+                        {isSel ? (
+                          <input
+                            className={styles.cellInput}
+                            value={n.code || ""}
+                            placeholder="Código"
+                            onChange={(e) =>
+                              updateNode(
+                                n.id,
+                                { code: e.target.value },
+                                undefined
+                              )
+                            }
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        ) : (
+                          <div className={styles.cellText}>{n.code || "—"}</div>
+                        )}
                       </td>
 
                       {/* TITLE */}
                       <td>
-                        <input
-                          className={styles.cellInput}
-                          value={n.title || ""}
-                          placeholder="Enunciado"
-                          onChange={(e) =>
-                            updateNode(
-                              n.id,
-                              { title: e.target.value },
-                              undefined
-                            )
-                          }
-                          onClick={(e) => e.stopPropagation()}
-                        />
+                        {isSel ? (
+                          <input
+                            className={styles.cellInput}
+                            value={n.title || ""}
+                            placeholder="Enunciado"
+                            onChange={(e) =>
+                              updateNode(
+                                n.id,
+                                { title: e.target.value },
+                                undefined
+                              )
+                            }
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        ) : (
+                          <div
+                            className={`${styles.cellText} ${styles.cellTextMultiline}`}
+                          >
+                            {n.title || "—"}
+                          </div>
+                        )}
                       </td>
 
                       {/* TYPE */}
                       <td>
-                        <select
-                          className={styles.cellSelect}
-                          value={n.type}
-                          onChange={(e) =>
-                            updateNode(
-                              n.id,
-                              { type: e.target.value },
-                              "Tipo actualizado."
-                            )
-                          }
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <option value={TYPES.LEVEL}>LEVEL</option>
-                          <option value={TYPES.GROUP}>GROUP</option>
-                          <option value={TYPES.ITEM}>ITEM</option>
-                        </select>
+                        {isSel ? (
+                          <select
+                            className={styles.cellSelect}
+                            value={n.type}
+                            onChange={(e) =>
+                              updateNode(
+                                n.id,
+                                { type: e.target.value },
+                                "Tipo actualizado."
+                              )
+                            }
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <option value={TYPES.LEVEL}>LEVEL</option>
+                            <option value={TYPES.GROUP}>GROUP</option>
+                            <option value={TYPES.ITEM}>ITEM</option>
+                          </select>
+                        ) : (
+                          <div className={styles.cellText}>{n.type}</div>
+                        )}
                       </td>
 
                       {/* PARENT */}
                       <td>
-                        <select
-                          className={styles.cellSelect}
-                          value={n.parentId || ""}
-                          onChange={(e) =>
-                            setParent(n.id, e.target.value || null)
-                          }
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <option value="">— (sin padre)</option>
-                          {allowedParents
-                            .filter((p) => p.id !== n.id)
-                            .map((p) => (
-                              <option key={p.id} value={p.id}>
-                                {p.type}: {nodeLabel(p)}
-                              </option>
-                            ))}
-                        </select>
+                        {isSel ? (
+                          <select
+                            className={styles.cellSelect}
+                            value={n.parentId || ""}
+                            onChange={(e) =>
+                              setParent(n.id, e.target.value || null)
+                            }
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <option value="">— (sin padre)</option>
+                            {allowedParents
+                              .filter((p) => p.id !== n.id)
+                              .map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.type}: {nodeLabel(p)}
+                                </option>
+                              ))}
+                          </select>
+                        ) : (
+                          <div className={styles.cellText}>
+                            {parent
+                              ? `${parent.type}: ${nodeLabel(parent)}`
+                              : "—"}
+                          </div>
+                        )}
                       </td>
 
                       {/* VI/VC readonly */}
@@ -2372,58 +2435,76 @@ export default function FileDetail() {
 
                       {/* PESO */}
                       <td>
-                        <input
-                          className={`${styles.cellInput} ${styles.mini}`}
-                          type="number"
-                          step="0.1"
-                          value={String(n.weight ?? 1)}
-                          onChange={(e) =>
-                            updateNode(
-                              n.id,
-                              { weight: Number(e.target.value || 0) },
-                              undefined
-                            )
-                          }
-                          onClick={(e) => e.stopPropagation()}
-                        />
+                        {isSel ? (
+                          <input
+                            className={`${styles.cellInput} ${styles.mini}`}
+                            type="number"
+                            step="0.1"
+                            value={String(n.weight ?? 1)}
+                            onChange={(e) =>
+                              updateNode(
+                                n.id,
+                                { weight: Number(e.target.value || 0) },
+                                undefined
+                              )
+                            }
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        ) : (
+                          <div className={styles.cellText}>
+                            {String(n.weight ?? 1)}
+                          </div>
+                        )}
                       </td>
 
                       {/* REQ */}
                       <td>
-                        <select
-                          className={`${styles.cellSelect} ${styles.mini}`}
-                          value={String(!!n.required)}
-                          onChange={(e) =>
-                            updateNode(
-                              n.id,
-                              { required: e.target.value === "true" },
-                              undefined
-                            )
-                          }
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <option value="true">Sí</option>
-                          <option value="false">No</option>
-                        </select>
+                        {isSel ? (
+                          <select
+                            className={`${styles.cellSelect} ${styles.mini}`}
+                            value={String(!!n.required)}
+                            onChange={(e) =>
+                              updateNode(
+                                n.id,
+                                { required: e.target.value === "true" },
+                                undefined
+                              )
+                            }
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <option value="true">Sí</option>
+                            <option value="false">No</option>
+                          </select>
+                        ) : (
+                          <div className={styles.cellText}>
+                            {n.required ? "Sí" : "No"}
+                          </div>
+                        )}
                       </td>
 
                       {/* ACTIVO */}
                       <td>
-                        <select
-                          className={`${styles.cellSelect} ${styles.mini}`}
-                          value={String(!!n.active)}
-                          onChange={(e) =>
-                            updateNode(
-                              n.id,
-                              { active: e.target.value === "true" },
-                              undefined
-                            )
-                          }
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <option value="true">Sí</option>
-                          <option value="false">No</option>
-                        </select>
+                        {isSel ? (
+                          <select
+                            className={`${styles.cellSelect} ${styles.mini}`}
+                            value={String(!!n.active)}
+                            onChange={(e) =>
+                              updateNode(
+                                n.id,
+                                { active: e.target.value === "true" },
+                                undefined
+                              )
+                            }
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <option value="true">Sí</option>
+                            <option value="false">No</option>
+                          </select>
+                        ) : (
+                          <div className={styles.cellText}>
+                            {n.active === false ? "No" : "Sí"}
+                          </div>
+                        )}
                       </td>
 
                       {/* CUSTOM COLUMNS */}
@@ -2448,6 +2529,23 @@ export default function FileDetail() {
                         }
 
                         const val = n.custom?.[c.key];
+                        const isEditableCell = isSel && c.editable !== false;
+                        if (!isEditableCell) {
+                          const display = (() => {
+                            if (val === null || val === undefined || val === "")
+                              return "—";
+                            if (c.type === "boolean") {
+                              const b = val === true || val === "true";
+                              return b ? "Sí" : "No";
+                            }
+                            return String(val);
+                          })();
+                          return (
+                            <td key={c.id}>
+                              <div className={styles.cellText}>{display}</div>
+                            </td>
+                          );
+                        }
 
                         if (c.type === "select") {
                           return (
@@ -2459,7 +2557,7 @@ export default function FileDetail() {
                                   setCustomValue(n.id, c.key, e.target.value)
                                 }
                                 onClick={(e) => e.stopPropagation()}
-                                disabled={!c.editable}
+                                disabled={c.editable === false}
                               >
                                 <option value="">—</option>
                                 {(c.options || []).map((opt) => (
@@ -2486,7 +2584,7 @@ export default function FileDetail() {
                                   )
                                 }
                                 onClick={(e) => e.stopPropagation()}
-                                disabled={!c.editable}
+                                disabled={c.editable === false}
                               >
                                 <option value="true">Sí</option>
                                 <option value="false">No</option>
@@ -2513,7 +2611,7 @@ export default function FileDetail() {
                                 setCustomValue(n.id, c.key, v);
                               }}
                               onClick={(e) => e.stopPropagation()}
-                              disabled={!c.editable}
+                              disabled={c.editable === false}
                             />
                           </td>
                         );
@@ -2803,7 +2901,7 @@ export default function FileDetail() {
                                       e.target.value
                                     )
                                   }
-                                  disabled={!c.editable}
+                                  disabled={c.editable === false}
                                 >
                                   <option value="">—</option>
                                   {(c.options || []).map((opt) => (
@@ -2835,7 +2933,7 @@ export default function FileDetail() {
                                       e.target.value === "true"
                                     )
                                   }
-                                  disabled={!c.editable}
+                                  disabled={c.editable === false}
                                 >
                                   <option value="true">Sí</option>
                                   <option value="false">No</option>
@@ -2864,7 +2962,7 @@ export default function FileDetail() {
                                       : raw;
                                   setCustomValue(selectedNode.id, c.key, v);
                                 }}
-                                disabled={!c.editable}
+                                disabled={c.editable === false}
                               />
                             </div>
                           );

@@ -71,11 +71,14 @@ body {
 .tableWrap {
   overflow: auto;
   max-height: calc(100vh - 120px);
+  content-visibility: auto;
+  contain-intrinsic-size: 900px;
 }
 
 .table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
   font-size: 13px;
 }
 
@@ -500,6 +503,33 @@ body {
   font-size: 13px;
   outline: none;
 }
+
+input.cellInput {
+  min-height: 34px;
+  resize: none;
+}
+
+textarea.cellInput {
+  min-height: 80px;
+  resize: vertical;
+}
+.cellText {
+  padding: 7px 8px;
+  min-height: 34px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cellTextMultiline {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .cellInput:focus,
 .cellSelect:focus {
   border-color: rgba(124, 58, 237, 0.6);
