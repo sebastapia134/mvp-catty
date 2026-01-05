@@ -394,8 +394,10 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
                         val = std_map.get("id") if nk == "id" else std_map.get("code")
                     elif "title" in nk or "enunci" in nk or "nombre" in nk:
                         val = std_map.get("title")
-                    elif "desc" in nk or "observ" in nk or "descrip" in nk:
-                        val = std_map.get("desc")
+                    elif "observ" in nk:
+                        val = r.get("observaciones") or r.get("obs") or ""
+                    elif "desc" in nk or "descrip" in nk:
+                         val = std_map.get("desc")
                     elif "vi" in nk and "label" not in nk:
                         val = std_map.get("vikey")
                     elif "vc" in nk and "label" not in nk:
