@@ -208,7 +208,7 @@ const RESERVED_NODE_KEYS = new Set([
 function baseHeaderDefs() {
   return [
     { key: "CODE", label: "Código", width: 110 },
-    { key: "TITLE", label: "Enunciado", width: null },
+    { key: "TITLE", label: "Enunciado", width: 110 },
     { key: "TYPE", label: "Tipo", width: 110 },
     { key: "PARENT_CODE", label: "Padre", width: 220 },
     { key: "VI_LABEL", label: "VI (texto)", width: 160 },
