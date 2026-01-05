@@ -97,6 +97,42 @@ function vcValue(scales, vcKey) {
   return scales?.VC?.find((s) => s.key === vcKey)?.value ?? null;
 }
 
+// 1) Añade este helper cerca de los otros helpers
+function mergeCustomFromRoot(nodes, columns) {
+  const keys = new Set((columns || []).map((c) => c.key).filter(Boolean));
+  if (!keys.size) return nodes;
+
+  return (nodes || []).map((n) => {
+    const cleaned = { ...n };
+    const customFromRoot = {};
+
+    for (const k of keys) {
+      if (Object.prototype.hasOwnProperty.call(cleaned, k)) {
+        customFromRoot[k] = cleaned[k];
+        delete cleaned[k]; // ✅ importante: evita duplicado root vs custom
+      }
+    }
+
+    const mergedCustom = { ...customFromRoot, ...(cleaned.custom || {}) };
+    return { ...cleaned, custom: mergedCustom };
+  });
+}
+const RESERVED_NODE_KEYS = new Set([
+  "id",
+  "parentId",
+  "order",
+  "type",
+  "code",
+  "title",
+  "desc",
+  "viKey",
+  "vcKey",
+  "weight",
+  "required",
+  "active",
+  "custom",
+]);
+
 function baseHeaderDefs() {
   return [
     { key: "CODE", label: "Código", width: 110 },
@@ -274,7 +310,7 @@ function ColumnsModal({
     }
 
     const payload = {
-      id: editId || uuid(),
+      id: key,
       label,
       key,
       type,
@@ -283,6 +319,22 @@ function ColumnsModal({
       options,
       formula: type === "formula" ? String(form.formula || "").trim() : "",
     };
+
+    if (editId) {
+      const prevCol = columns.find((c) => c.id === editId);
+      const oldKey = prevCol?.key;
+      if (oldKey && oldKey !== key) {
+        setNodes((prev) =>
+          prev.map((n) => {
+            const cst = n.custom || {};
+            if (!Object.prototype.hasOwnProperty.call(cst, oldKey)) return n;
+            const custom = { ...cst, [key]: cst[oldKey] };
+            delete custom[oldKey];
+            return { ...n, custom };
+          })
+        );
+      }
+    }
 
     setColumns((prev) => {
       const next = [...prev];
@@ -746,9 +798,10 @@ function normalizeColumnsAny(payload) {
       const options = Array.isArray(optionsRaw) ? optionsRaw.map(String) : [];
 
       const formula = String(getAny(c, ["formula", "fórmula"]) ?? "").trim();
+      const stableId = String(c.id || c.key || key); // 👈 estable
 
       return {
-        id: c.id || uuid(),
+        id: stableId,
         label: label || key,
         key,
         type: ["text", "number", "select", "boolean", "formula"].includes(type)
@@ -916,6 +969,8 @@ function normalizeNodesAny(payload, scales) {
 
       const depth = depthFromCode(code);
       const type = coerceType(rawType, depth, false);
+      const { custom: _custom, children, hijos, ...rest } = n || {};
+      const customObj = _custom && typeof _custom === "object" ? _custom : {};
 
       return {
         id: n.id || getAny(n, ["uuid", "ID", "Id"]) || uuid(),
@@ -1112,6 +1167,154 @@ function adaptEditorPayload(raw, fallbackScales) {
   };
 }
 
+function mapTypeToOriginal(t) {
+  if (!t) return null;
+  if (String(t).toUpperCase() === "GROUP") return "G";
+  if (String(t).toUpperCase() === "ITEM") return "A";
+  if (String(t).toUpperCase() === "LEVEL") return "G"; // niveles los tratamos como grupos
+  return String(t).toUpperCase();
+}
+
+// parse "1.1.2.3." -> [1,1,2,3,null]
+function parseHierarchyParts(code) {
+  const c = normalizeCode(code || "");
+  if (!c) return [null, null, null, null, null];
+  const parts = c
+    .split(".")
+    .filter(Boolean)
+    .map((p) => {
+      const n = Number(p);
+      return Number.isFinite(n) ? n : null;
+    });
+  const out = [null, null, null, null, null];
+  for (let i = 0; i < Math.min(5, parts.length); i++) out[i] = parts[i];
+  return out;
+}
+
+// busca claves similares (normalizadas) dentro de custom u objeto
+function findField(o, candidates) {
+  if (!o || typeof o !== "object") return undefined;
+  for (const k of candidates) {
+    if (Object.prototype.hasOwnProperty.call(o, k)) return o[k];
+  }
+  const entries = Object.entries(o);
+  const want = candidates.map(normFieldName);
+  for (const [k, v] of entries) {
+    if (want.includes(normFieldName(k))) return v;
+  }
+  return undefined;
+}
+
+/*
+  Serializa el estado del editor al "formato original" esperado.
+  - edited: objeto con campos meta,intro,questions,scales,ui,columns,nodes
+  - options.preserveScales: si true, incluye scales en la salida (si el archivo original lo tenía)
+*/
+function editedToOriginal(edited, options = {}) {
+  const preserveScales = !!options.preserveScales;
+
+  const metaOut = edited.meta || {};
+  const introOut = Array.isArray(edited.intro) ? edited.intro : [];
+  const questionsOut = edited.questions || {};
+  const uiOut = edited.ui || { showMeta: true };
+
+  // columns -> formato original: { key, type, label }
+  const colsOut = (Array.isArray(edited.columns) ? edited.columns : []).map(
+    (c) => {
+      const keyLow = String(c.key || c.id || "").toLowerCase();
+      // map type: mantén tipo simple (number/text/longtext) - adaptalo si necesitas otros mapeos
+      const type =
+        c.type === "number"
+          ? "number"
+          : c.type === "formula"
+          ? "text"
+          : c.type === "select"
+          ? "text"
+          : c.type === "boolean"
+          ? "text"
+          : "text";
+      return {
+        key: keyLow,
+        type,
+        label: c.label || c.key || "",
+      };
+    }
+  );
+
+  // nodes: mapear cada nodo al esquema original
+  const nodesOut = (Array.isArray(edited.nodes) ? edited.nodes : []).map(
+    (n) => {
+      const idOut = toNumericOrNull(n.id) ?? n.id;
+      const code = String(n.code ?? n.codigo ?? "").trim();
+      const [p1, p2, p3, p4, p5] = parseHierarchyParts(code);
+
+      // intentar recuperar agrupacion_es / observaciones / nivel_* de custom u otros campos conservados
+      const agrup_es =
+        n.agrupacion_es ??
+        findField(n, [
+          "agrupacion_es",
+          "agrupación_es",
+          "agrupacion_español",
+        ]) ??
+        findField(n.custom || {}, [
+          "AGRUPACION_ES",
+          "agrupacion_es",
+          "agrupacion_español",
+        ]) ??
+        null;
+
+      const observaciones =
+        n.observaciones ??
+        findField(n, ["observaciones", "obs"]) ??
+        findField(n.custom || {}, ["OBSERVACIONES", "observaciones", "obs"]) ??
+        null;
+
+      const nivel_aplicacion =
+        n.nivel_aplicacion ??
+        findField(n, ["nivel_aplicacion", "nivel_aplicación"]) ??
+        null;
+
+      const nivel_importancia =
+        n.nivel_importancia ??
+        findField(n, ["nivel_importancia", "nivel_importancia"]) ??
+        null;
+
+      return {
+        id: idOut,
+        1: p1,
+        2: p2,
+        3: p3,
+        4: p4,
+        5: p5,
+        tipo: mapTypeToOriginal(n.type),
+        codigo: code,
+        descripcion: n.desc ?? n.descripcion ?? "",
+        agrupacion_en: n.title ?? n.agrupacion_en ?? "",
+        agrupacion_es: agrup_es ?? null,
+        observaciones: observaciones ?? null,
+        nivel_aplicacion: nivel_aplicacion ?? null,
+        nivel_importancia: nivel_importancia ?? null,
+      };
+    }
+  );
+
+  const out = {
+    meta: metaOut,
+    intro: introOut,
+    questions: questionsOut,
+    ui: uiOut,
+    columns: colsOut,
+    nodes: nodesOut,
+  };
+
+  if (preserveScales && edited.scales) {
+    // si el archivo original tenía scales, las movemos tal cual (para no perder info)
+    out.scales = edited.scales;
+  }
+
+  return out;
+}
+
 export default function FileDetail() {
   const { fileId } = useParams();
   const navigate = useNavigate();
@@ -1207,6 +1410,9 @@ export default function FileDetail() {
       selectedId: sel,
       warning,
     } = adaptEditorPayload(raw, DEFAULT_SCALES);
+    const nodesWithCustom = mergeCustomFromRoot(nds, cols);
+
+    //    y luego usa nodesWithCustom en lugar de nds para normalizar IDs:
 
     setMeta(m || {});
     setIntro(Array.isArray(i) ? i : []);
@@ -1218,9 +1424,9 @@ export default function FileDetail() {
 
     // nodos: normaliza IDs a numéricos y ajusta el contador
     let counter = 1;
-    const normalizedNodes = (Array.isArray(nds) ? nds : []).map((n) =>
-      normalizeNodeIds(n, () => counter++)
-    );
+    const normalizedNodes = (
+      Array.isArray(nodesWithCustom) ? nodesWithCustom : []
+    ).map((n) => normalizeNodeIds(n, () => counter++));
     const maxId = normalizedNodes.reduce(
       (m, n) => (Number.isFinite(n.id) ? Math.max(m, n.id) : m),
       0
@@ -1540,32 +1746,32 @@ export default function FileDetail() {
 
     setSaving(true);
     try {
-      const dataObj = {
-        meta: meta || {},
-        intro: Array.isArray(intro) ? intro : [],
-        questions: questions || {},
-        scales: scales || DEFAULT_SCALES,
-        ui: ui || { showMeta: true },
-        columns: (columns || []).map((c) => ({
-          id: c.id,
-          label: c.label,
-          key: c.key,
-          type: c.type,
-          appliesTo: c.appliesTo || "ALL",
-          editable: c.editable !== false,
-          options: Array.isArray(c.options) ? c.options : [],
-          formula: c.formula || "",
-        })),
-        nodes: (nodes || []).map((n) => ({
-          ...n,
-          id: toNumericOrNull(n.id) ?? n.id, // fuerza numérico si aplica
-          parentId:
-            n.parentId == null ? null : toNumericOrNull(n.parentId) ?? null,
-          custom: n.custom || {},
-        })),
+      // detecta si el archivo original venía empaquetado en { data: {...} }
+      const rawFileJson = parseJsonMaybe(file?.file_json ?? null) || {};
+      const hasDataLayer =
+        rawFileJson && typeof rawFileJson === "object" && rawFileJson.data;
+      const originalHadScales =
+        (rawFileJson && rawFileJson.scales) ||
+        (rawFileJson && rawFileJson.data && rawFileJson.data.scales);
+
+      // serializa el estado del editor al formato original
+      const dataObj = editedToOriginal(
+        {
+          meta,
+          intro,
+          questions,
+          scales,
+          ui,
+          columns,
+          nodes,
+        },
+        { preserveScales: !!originalHadScales }
+      );
+
+      const payload = {
+        file_json: hasDataLayer ? { data: dataObj } : dataObj,
       };
 
-      const payload = { file_json: { data: dataObj } };
       const updated = await updateFile(fileId, payload, token);
       setFile(updated);
       setDirty(false);
@@ -1580,22 +1786,21 @@ export default function FileDetail() {
 
   // Export JSON (cliente)
   function handleExportJson() {
-    const dataObj = {
-      meta: meta || {},
-      intro: Array.isArray(intro) ? intro : [],
-      questions: questions || {},
-      scales: scales || DEFAULT_SCALES,
-      ui: ui || { showMeta: true },
-      columns,
-      nodes: (nodes || []).map((n) => ({
-        ...n,
-        id: toNumericOrNull(n.id) ?? n.id,
-        parentId:
-          n.parentId == null ? null : toNumericOrNull(n.parentId) ?? null,
-        custom: n.custom || {},
-      })),
-    };
+    // exporta en la forma original (envuelta en { data: ... } para compatibilidad)
+    const dataObj = editedToOriginal(
+      {
+        meta,
+        intro,
+        questions,
+        scales,
+        ui,
+        columns,
+        nodes,
+      },
+      { preserveScales: !!scales } // opcional: incluye scales si existen en el editor
+    );
 
+    // Mantener la envoltura { data: ... } para que sea idéntico a formato original mostrado en tu ejemplo
     downloadJSON(`${safeFilename(file?.name || "checklist")}.json`, {
       data: dataObj,
     });
