@@ -19,14 +19,14 @@ const DEFAULT_SCALES = {
   VI: [
     { key: "VI_5", label: "Muy importante / Crítico", value: 5 },
     { key: "VI_4", label: "Importante", value: 4 },
-    { key: "VI_3", label: "Medianamente importante", value: 3 },
+    { key: "VI_3", label: "Neutro", value: 3 },
     { key: "VI_2", label: "Poco importante", value: 2 },
     { key: "VI_1", label: "No importante", value: 1 },
   ],
   VC: [
-    { key: "VC_1", label: "Aplica", value: 1 },
-    { key: "VC_05", label: "Parcialmente", value: 0.5 },
-    { key: "VC_0", label: "No aplica", value: 0 },
+    { key: "VC_1", label: "Aplica", value: 3 },
+    { key: "VC_05", label: "Parcialmente", value: 2 },
+    { key: "VC_0", label: "No aplica", value: 1 },
   ],
 };
 
@@ -2112,13 +2112,6 @@ export default function FileDetail() {
           <div className={styles.panelHeader}>Estructura</div>
 
           <div className={styles.treeActions}>
-            <button
-              className={styles.btn}
-              onClick={() => addNode(TYPES.LEVEL)}
-              type="button"
-            >
-              + Nivel
-            </button>
             <button
               className={styles.btn}
               onClick={() => addNode(TYPES.GROUP)}

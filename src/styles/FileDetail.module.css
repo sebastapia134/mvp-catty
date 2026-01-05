@@ -6,6 +6,7 @@ body {
   min-height: 100vh;
   background: #0b1220;
   color: #eaf0ff;
+  color-scheme: dark;
 }
 
 .header {
@@ -770,4 +771,50 @@ textarea.cellInput {
   .modalBodyGrid {
     grid-template-columns: 1fr;
   }
+}
+
+.page {
+  color-scheme: dark;
+}
+
+/* 2) Fuerza color legible para el select cerrado y sus hijos (fallback) */
+.cellSelect,
+.cellSelect * {
+  color: var(--text) !important;
+}
+
+/* 3) Intento de estilizar las <option> (algunos navegadores lo respetan) */
+.cellSelect option {
+  color: var(--text) !important;
+  background-color: var(--panel) !important;
+  -webkit-text-fill-color: var(--text) !important; /* ayuda en WebKit/Safari */
+}
+
+/* 4) Medida alternativa (si ves texto pálido en plataformas que obligan fondo blanco nativo)
+   descomenta y ajusta si prefieres que las opciones nativas muestren texto oscuro sobre fondo blanco:
+
+.cellSelect option {
+  color: #0b1220 !important;   / * texto oscuro para dropdowns nativos blancos * /
+  background-color: #ffffff !important;
+}
+*/
+
+/* --- end fix --- */
+select {
+  background-color: #f0f0f0; /* Color de fondo del recuadro */
+  color: #333; /* Color del texto */
+  border: 1px solid #ccc;
+  padding: 8px 12px;
+  border-radius: 5px;
+  font-size: 1em;
+  cursor: pointer;
+  appearance: none; /* Para eliminar estilo por defecto y tener más control */
+  -webkit-appearance: none; /* Para Safari */
+  -moz-appearance: none; /* Para Firefox */
+}
+
+/* Estilo al enfocar (clic) */
+select:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.25);
 }
