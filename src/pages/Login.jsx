@@ -37,6 +37,23 @@ export default function Login() {
     }, 140);
   };
 
+  // 🔹 NUEVO: función que decide a dónde mandar al usuario según si es admin
+  const redirectAfterAuth = (data) => {
+    // data viene del backend: { token, user: { ..., is_admin: bool } }
+    setAuth(data.token);
+
+    // Mantenemos tu reloadUser para sincronizar el contexto
+    reloadUser().finally(() => {
+      if (data.user?.is_admin) {
+        // Si es admin => va a la pantalla exclusiva
+        navigate("/admin");
+      } else {
+        // Si no, va al dashboard normal
+        navigate("/dashboard");
+      }
+    });
+  };
+
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoadingLogin(true);
@@ -56,9 +73,9 @@ export default function Login() {
         body: { email, password },
       });
 
-      setAuth(data.token);
-      await reloadUser();
-      navigate("/dashboard");
+      // 🔄 ANTES: setAuth + reloadUser + navigate("/dashboard")
+      // ✅ AHORA:
+      redirectAfterAuth(data);
     } catch (err) {
       showNotification(err.message || "Error al iniciar sesión.");
     } finally {
@@ -93,9 +110,9 @@ export default function Login() {
         body: { email, password, full_name: full_name || null },
       });
 
-      setAuth(data.token);
-      await reloadUser();
-      navigate("/dashboard");
+      // 🔄 ANTES: setAuth + reloadUser + navigate("/dashboard")
+      // ✅ AHORA:
+      redirectAfterAuth(data);
     } catch (err) {
       showNotification(err.message || "Error en el registro.");
     } finally {
@@ -110,9 +127,9 @@ export default function Login() {
         body: { id_token: response.credential },
       });
 
-      setAuth(data.token);
-      await reloadUser();
-      navigate("/dashboard");
+      // 🔄 ANTES: setAuth + reloadUser + navigate("/dashboard")
+      // ✅ AHORA:
+      redirectAfterAuth(data);
     } catch (err) {
       showNotification(err.message || "Error con Google.");
     }

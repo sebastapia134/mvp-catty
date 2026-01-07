@@ -4,6 +4,7 @@ from sqlalchemy import text
 from app.db.session import engine, SessionLocal
 from app.api.router import api_router
 from app.db.seed import ensure_base_template
+from app.api.routes import admin 
 
 app = FastAPI(title="Catty MVP API")
 
@@ -20,6 +21,8 @@ app.add_middleware(
 
 
 app.include_router(api_router)
+app.include_router(admin.router)
+
 
 @app.get("/health")
 def health():

@@ -1,13 +1,12 @@
 import { Routes, Route, Navigate } from "react-router-dom";
+import { useContext } from "react";
+
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
-import { useContext } from "react";
-import { AuthContext } from "./context/AuthContext";
 import NewFile from "./pages/NewFile";
 import FileDetail from "./pages/FileDetail";
-
-// ...
-<Route path="/files/:fileId" element={<FileDetail />} />;
+import AdminDashboard from "./pages/AdminDashboard";
+import { AuthContext } from "./context/AuthContext";
 
 function Protected({ children }) {
   const { token, loadingUser } = useContext(AuthContext);
@@ -20,6 +19,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+
       <Route
         path="/dashboard"
         element={
@@ -28,6 +28,7 @@ export default function App() {
           </Protected>
         }
       />
+
       <Route
         path="/files/new"
         element={
@@ -36,11 +37,21 @@ export default function App() {
           </Protected>
         }
       />
+
       <Route
         path="/files/:fileId"
         element={
           <Protected>
             <FileDetail />
+          </Protected>
+        }
+      />
+
+      <Route
+        path="/admin"
+        element={
+          <Protected>
+            <AdminDashboard />
           </Protected>
         }
       />
