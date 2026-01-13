@@ -1242,7 +1242,6 @@ function mapTypeToOriginal(t) {
   if (!t) return null;
   if (String(t).toUpperCase() === "GROUP") return "G";
   if (String(t).toUpperCase() === "ITEM") return "A";
-  if (String(t).toUpperCase() === "LEVEL") return "G"; // niveles los tratamos como grupos
   return String(t).toUpperCase();
 }
 
