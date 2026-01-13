@@ -39,11 +39,8 @@ function toNumericOrNull(raw) {
 // Normaliza un nodo para que sus IDs sean numéricos.
 function normalizeNodeIds(node, nextId) {
   const maybeId = toNumericOrNull(node.id);
-  // Si node.id es numérico lo usamos como number; si no, conservamos el id string (si existe)
   const id = maybeId !== null ? maybeId : node.id ?? nextId();
 
-  // parentId: si es numérico lo ponemos como number (y 0 => null),
-  // si no es numérico lo conservamos (puede ser código o uuid).
   const p = toNumericOrNull(node.parentId);
   let parentId;
   if (p !== null) {
@@ -54,9 +51,6 @@ function normalizeNodeIds(node, nextId) {
 
   return { ...node, id, parentId };
 }
-
-// Resuelve un valor de input (p.ej. value de <select>) al id real del nodo
-// devolviendo el id con el tipo correcto (number o string), o null.
 
 function uuid() {
   try {
@@ -152,10 +146,6 @@ function labelize(key) {
   return map[key] || String(key).replaceAll("_", " ");
 }
 
-function isApplicable(col, node) {
-  return col.appliesTo === "ALL" || col.appliesTo === node.type;
-}
-
 function viLabel(scales, viKey) {
   return scales?.VI?.find((s) => s.key === viKey)?.label ?? "";
 }
@@ -169,41 +159,630 @@ function vcValue(scales, vcKey) {
   return scales?.VC?.find((s) => s.key === vcKey)?.value ?? null;
 }
 
-// 1) Añade este helper cerca de los otros helpers
-function mergeCustomFromRoot(nodes, columns) {
-  const keys = new Set((columns || []).map((c) => c.key).filter(Boolean));
-  if (!keys.size) return nodes;
+// ====== ADAPTADOR ROBUSTO PARA JSON DINÁMICO (claves variadas) ======
 
-  return (nodes || []).map((n) => {
-    const cleaned = { ...n };
-    const customFromRoot = {};
-
-    for (const k of keys) {
-      if (Object.prototype.hasOwnProperty.call(cleaned, k)) {
-        customFromRoot[k] = cleaned[k];
-        delete cleaned[k]; // ✅ importante: evita duplicado root vs custom
-      }
-    }
-
-    const mergedCustom = { ...customFromRoot, ...(cleaned.custom || {}) };
-    return { ...cleaned, custom: mergedCustom };
-  });
+function stripDiacritics(s) {
+  try {
+    return String(s || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+  } catch {
+    return String(s || "");
+  }
 }
-const RESERVED_NODE_KEYS = new Set([
-  "id",
-  "parentId",
-  "order",
-  "type",
-  "code",
-  "title",
-  "desc",
-  "viKey",
-  "vcKey",
-  "weight",
-  "required",
-  "active",
-  "custom",
-]);
+
+function normFieldName(k) {
+  return stripDiacritics(k).toLowerCase().replace(/\s+/g, "_");
+}
+
+function parseJsonMaybe(x) {
+  if (typeof x !== "string") return x;
+  const t = x.trim();
+  if (!t) return {};
+  try {
+    return JSON.parse(t);
+  } catch {
+    return x;
+  }
+}
+
+function unwrapDataLayer(x) {
+  let p = x;
+  for (let i = 0; i < 3; i++) {
+    if (p && typeof p === "object" && p.data && typeof p.data === "object")
+      p = p.data;
+    else break;
+  }
+  return p;
+}
+
+function getAny(obj, candidates) {
+  if (!obj || typeof obj !== "object") return undefined;
+
+  for (const k of candidates) {
+    if (Object.prototype.hasOwnProperty.call(obj, k)) return obj[k];
+  }
+
+  const entries = Object.entries(obj);
+  const want = candidates.map(normFieldName);
+  for (const [k, v] of entries) {
+    const nk = normFieldName(k);
+    if (want.includes(nk)) return v;
+  }
+
+  return undefined;
+}
+
+function getByRegex(obj, regexes) {
+  if (!obj || typeof obj !== "object") return undefined;
+  const entries = Object.entries(obj);
+  for (const rx of regexes) {
+    for (const [k, v] of entries) {
+      const nk = normFieldName(k);
+      if (rx.test(nk)) return v;
+    }
+  }
+  return undefined;
+}
+
+function normalizeCode(code) {
+  const s = String(code ?? "").trim();
+  return s.replace(/\s+/g, " ").replace(/\.+$/g, "");
+}
+
+function depthFromCode(code) {
+  const c = normalizeCode(code);
+  if (!c) return 0;
+  const parts = c.split(".").filter(Boolean);
+  return parts.length;
+}
+
+function parentCodeFromCode(code) {
+  const c = normalizeCode(code);
+  const parts = c.split(".").filter(Boolean);
+  if (parts.length <= 1) return "";
+  return parts.slice(0, -1).join(".");
+}
+
+function coerceBool(v, fallback = true) {
+  if (v === true || v === false) return v;
+  if (v === "true" || v === "false") return v === "true";
+  if (v === 1 || v === 0) return !!v;
+  return fallback;
+}
+
+function coerceNumber(v, fallback = 1) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function coerceType(rawType, depthHint = 0, hasChildren = false) {
+  const t = String(rawType ?? "")
+    .trim()
+    .toUpperCase();
+
+  if (t === "LEVEL" || t === "NIVEL" || t === "N") return "LEVEL";
+  if (
+    t === "GROUP" ||
+    t === "GRUPO" ||
+    t === "AGRUPACION" ||
+    t === "AGRUPACIÓN" ||
+    t === "G"
+  )
+    return "GROUP";
+  if (
+    t === "ITEM" ||
+    t === "ITEMS" ||
+    t === "I" ||
+    t === "A" ||
+    t === "CRITERIO" ||
+    t === "PREGUNTA"
+  )
+    return "ITEM";
+
+  if (depthHint === 1) return "LEVEL";
+  if (hasChildren) return "GROUP";
+  return "ITEM";
+}
+
+function coerceViKey(scales, raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return "VI_3";
+  if (/^VI_\d+$/i.test(s)) return s.toUpperCase();
+  const n = Number(raw);
+  if (Number.isFinite(n)) {
+    const k = `VI_${Math.max(1, Math.min(5, Math.round(n)))}`;
+    const exists = (scales?.VI || []).some((x) => x.key === k);
+    return exists ? k : "VI_3";
+  }
+  return "VI_3";
+}
+
+function coerceVcKey(scales, raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return "VC_1";
+  if (/^VC_\d+$/i.test(s) || /^VC_0?5$/i.test(s))
+    return s.toUpperCase().replace("VC_05", "VC_05");
+  const n = Number(raw);
+  if (Number.isFinite(n)) {
+    if (n === 1) return "VC_1";
+    if (n === 0.5) return "VC_05";
+    if (n === 0) return "VC_0";
+  }
+  return "VC_1";
+}
+
+function flattenTreeAny(treeArray, scales) {
+  const out = [];
+  const walk = (node, parentId, depth) => {
+    const kids =
+      getAny(node, ["children", "hijos", "nodes", "items"]) ||
+      getByRegex(node, [/^children$/, /^hijos$/, /^nodes$/, /^items$/]) ||
+      [];
+    const hasChildren = Array.isArray(kids) && kids.length > 0;
+
+    const rawCode =
+      getAny(node, ["code", "codigo", "código"]) ??
+      getByRegex(node, [/^code$/, /codigo/]);
+
+    const rawTitle =
+      getAny(node, [
+        "title",
+        "titulo",
+        "título",
+        "enunciado",
+        "nombre",
+        "name",
+        "label",
+        "agrupacion",
+        "agrupación",
+      ]) ??
+      getByRegex(node, [
+        /enunciado/,
+        /titulo/,
+        /title/,
+        /nombre/,
+        /label/,
+        /agrup/,
+      ]);
+
+    const rawType =
+      getAny(node, ["type", "tipo", "kind"]) ??
+      getByRegex(node, [/^type$/, /^tipo$/, /kind/]);
+
+    const code = String(rawCode ?? "").trim();
+    const title = String(rawTitle ?? "").trim();
+
+    out.push({
+      id: node.id || uuid(),
+      type: coerceType(rawType, depth, hasChildren),
+      code,
+      title,
+      desc: String(
+        getAny(node, ["desc", "descripcion", "descripción", "ayuda", "help"]) ??
+          ""
+      ),
+      parentId:
+        parentId == null || parentId === ""
+          ? null
+          : typeof parentId === "string" || typeof parentId === "number"
+          ? String(parentId)
+          : null,
+      viKey: coerceViKey(
+        scales,
+        getAny(node, [
+          "viKey",
+          "vi",
+          "vi_key",
+          "nivel_importancia",
+          "importancia",
+        ])
+      ),
+      vcKey: coerceVcKey(
+        scales,
+        getAny(node, ["vcKey", "vc", "vc_key", "aplica"])
+      ),
+      weight: coerceNumber(getAny(node, ["weight", "peso"]), 1),
+      required: coerceBool(getAny(node, ["required", "requerido"]), true),
+      active: coerceBool(getAny(node, ["active", "activo"]), true),
+      order: coerceNumber(getAny(node, ["order", "orden"]), out.length * 10),
+      observaciones:
+        getAny(node, ["observaciones", "obs"]) ??
+        getByRegex(node, [/observaciones/, /obs/]) ??
+        "",
+    });
+
+    if (hasChildren) {
+      const thisId = out[out.length - 1].id;
+      kids.forEach((k) => walk(k, thisId, depth + 1));
+    }
+  };
+
+  (treeArray || []).forEach((n) => walk(n, null, 1));
+  return out;
+}
+
+function normalizeNodesAny(payload, scales) {
+  const rawNodes =
+    (Array.isArray(payload?.nodes) && payload.nodes) ||
+    (Array.isArray(payload?.nodos) && payload.nodos) ||
+    (Array.isArray(payload?.items) && payload.items) ||
+    null;
+
+  const rawTree =
+    (!rawNodes && Array.isArray(payload?.tree) && payload.tree) ||
+    (!rawNodes && Array.isArray(payload?.estructura) && payload.estructura) ||
+    (!rawNodes && Array.isArray(payload?.structure) && payload.structure) ||
+    null;
+
+  let nodes = [];
+
+  if (rawNodes) {
+    nodes = rawNodes.map((n, idx) => {
+      const rawCode =
+        getAny(n, ["code", "codigo", "código"]) ??
+        getByRegex(n, [/^code$/, /codigo/]);
+
+      const rawTitle =
+        getAny(n, [
+          "title",
+          "titulo",
+          "título",
+          "enunciado",
+          "nombre",
+          "name",
+          "label",
+          "agrupacion",
+          "agrupación",
+        ]) ??
+        getByRegex(n, [
+          /enunciado/,
+          /titulo/,
+          /title/,
+          /nombre/,
+          /label/,
+          /agrup/,
+        ]);
+
+      const rawType =
+        getAny(n, ["type", "tipo", "kind"]) ??
+        getByRegex(n, [/^type$/, /^tipo$/, /kind/]);
+
+      const rawParent =
+        getAny(n, [
+          "parentId",
+          "parent_id",
+          "padre",
+          "padreId",
+          "id_padre",
+          "parent",
+        ]) ?? getByRegex(n, [/parent/, /padre/]);
+
+      const code = String(rawCode ?? "").trim();
+      const title = String(rawTitle ?? "").trim();
+
+      const depth = depthFromCode(code);
+      const type = coerceType(rawType, depth, false);
+
+      return {
+        id: n.id || getAny(n, ["uuid", "ID", "Id"]) || uuid(),
+        type,
+        code,
+        title,
+        desc: String(
+          getAny(n, ["desc", "descripcion", "descripción", "ayuda", "help"]) ??
+            ""
+        ),
+        parentId:
+          rawParent == null || rawParent === ""
+            ? null
+            : typeof rawParent === "string" || typeof rawParent === "number"
+            ? String(rawParent)
+            : null,
+        viKey: coerceViKey(
+          scales,
+          getAny(n, [
+            "viKey",
+            "vi",
+            "vi_key",
+            "nivel_importancia",
+            "importancia",
+          ])
+        ),
+        vcKey: coerceVcKey(
+          scales,
+          getAny(n, ["vcKey", "vc", "vc_key", "aplica"])
+        ),
+        weight: coerceNumber(getAny(n, ["weight", "peso"]), 1),
+        required: coerceBool(getAny(n, ["required", "requerido"]), true),
+        active: coerceBool(getAny(n, ["active", "activo"]), true),
+        order: coerceNumber(getAny(n, ["order", "orden"]), (idx + 1) * 10),
+        observaciones:
+          getAny(n, ["observaciones", "obs"]) ??
+          getByRegex(n, [/observaciones/, /obs/]) ??
+          "",
+      };
+    });
+  } else if (rawTree) {
+    nodes = flattenTreeAny(rawTree, scales);
+  }
+
+  if (nodes.length === 0) {
+    const rows =
+      (Array.isArray(payload?.rows) && payload.rows) ||
+      (Array.isArray(payload?.checklist) && payload.checklist) ||
+      (Array.isArray(payload?.data) && payload.data) ||
+      [];
+
+    if (Array.isArray(rows) && rows.length) {
+      const mapCodeToId = new Map();
+
+      nodes = rows.map((r, idx) => {
+        const code = String(
+          getAny(r, ["code", "codigo", "código"]) ??
+            getByRegex(r, [/^code$/, /codigo/]) ??
+            ""
+        ).trim();
+
+        const title = String(
+          getAny(r, [
+            "title",
+            "titulo",
+            "título",
+            "enunciado",
+            "agrupacion",
+            "agrupación",
+            "nombre",
+            "name",
+            "label",
+          ]) ??
+            getByRegex(r, [
+              /enunciado/,
+              /titulo/,
+              /title/,
+              /agrup/,
+              /nombre/,
+              /label/,
+            ]) ??
+            ""
+        ).trim();
+
+        const depth = depthFromCode(code);
+        const rawType =
+          getAny(r, ["type", "tipo"]) ?? getByRegex(r, [/^type$/, /^tipo$/]);
+        const type = coerceType(rawType, depth, false);
+
+        const id = uuid();
+        mapCodeToId.set(normalizeCode(code), id);
+
+        return {
+          id,
+          type,
+          code,
+          title,
+          desc: String(
+            getAny(r, [
+              "desc",
+              "descripcion",
+              "descripción",
+              "observaciones",
+              "obs",
+            ]) ?? ""
+          ),
+          parentId: null,
+          viKey: coerceViKey(
+            scales,
+            getAny(r, ["viKey", "vi", "nivel_importancia", "importancia"])
+          ),
+          vcKey: coerceVcKey(scales, getAny(r, ["vcKey", "vc", "aplica"])),
+          weight: coerceNumber(getAny(r, ["weight", "peso"]), 1),
+          required: coerceBool(getAny(r, ["required", "requerido"]), true),
+          active: coerceBool(getAny(r, ["active", "activo"]), true),
+          order: (idx + 1) * 10,
+          observaciones:
+            getAny(r, ["observaciones", "obs"]) ??
+            getByRegex(r, [/observaciones/, /obs/]) ??
+            "",
+        };
+      });
+
+      nodes = nodes.map((n) => {
+        const pc = parentCodeFromCode(n.code);
+        if (!pc) return n;
+        const pid = mapCodeToId.get(normalizeCode(pc));
+        return pid ? { ...n, parentId: pid } : n;
+      });
+    }
+  }
+
+  if (nodes.length) {
+    const idSet = new Set(nodes.map((n) => n.id));
+    const byCode = new Map(
+      nodes.filter((n) => n.code).map((n) => [normalizeCode(n.code), n.id])
+    );
+
+    nodes = nodes.map((n) => {
+      if (!n.parentId) return n;
+      if (idSet.has(n.parentId)) return n;
+
+      const maybe = byCode.get(normalizeCode(n.parentId));
+      return maybe ? { ...n, parentId: maybe } : n;
+    });
+  }
+
+  return nodes;
+}
+
+function adaptEditorPayload(raw, fallbackScales) {
+  const parsed = unwrapDataLayer(parseJsonMaybe(raw));
+  const payload = parsed && typeof parsed === "object" ? parsed : {};
+
+  const scales = payload.scales || payload.escalas || fallbackScales;
+
+  const meta =
+    payload.meta || payload.form || payload.datos || payload.metadata || {};
+
+  const intro = Array.isArray(payload.intro)
+    ? payload.intro
+    : Array.isArray(payload.introduccion)
+    ? payload.introduccion
+    : [];
+
+  const questions = payload.questions || payload.preguntas || {};
+
+  const ui = payload.ui || { showMeta: true };
+
+  const nodes = normalizeNodesAny(payload, scales);
+
+  const selectedIdRaw =
+    payload.selectedId || payload.selected_id || payload.seleccion || null;
+
+  const selectedId =
+    selectedIdRaw && nodes.some((n) => n.id === selectedIdRaw)
+      ? selectedIdRaw
+      : nodes[0]?.id || null;
+
+  const warning =
+    nodes.length === 0
+      ? "No encontré nodos en el JSON (revisa la forma del payload)."
+      : "";
+
+  return {
+    meta,
+    intro,
+    questions,
+    scales,
+    ui,
+    nodes,
+    selectedId,
+    warning,
+  };
+}
+
+function mapTypeToOriginal(t) {
+  if (!t) return null;
+  if (String(t).toUpperCase() === "GROUP") return "G";
+  if (String(t).toUpperCase() === "ITEM") return "A";
+  if (String(t).toUpperCase() === "LEVEL") return "G";
+  return String(t).toUpperCase();
+}
+
+function parseHierarchyParts(code) {
+  const c = normalizeCode(code || "");
+  if (!c) return [null, null, null, null, null];
+  const parts = c
+    .split(".")
+    .filter(Boolean)
+    .map((p) => {
+      const n = Number(p);
+      return Number.isFinite(n) ? n : null;
+    });
+  const out = [null, null, null, null, null];
+  for (let i = 0; i < Math.min(5, parts.length); i++) out[i] = parts[i];
+  return out;
+}
+
+function findField(o, candidates) {
+  if (!o || typeof o !== "object") return undefined;
+  for (const k of candidates) {
+    if (Object.prototype.hasOwnProperty.call(o, k)) return o[k];
+  }
+  const entries = Object.entries(o);
+  const want = candidates.map(normFieldName);
+  for (const [k, v] of entries) {
+    if (want.includes(normFieldName(k))) return v;
+  }
+  return undefined;
+}
+
+function editedToOriginal(edited, options = {}) {
+  const preserveScales = !!options.preserveScales;
+
+  const metaOut = edited.meta || {};
+  const introOut = Array.isArray(edited.intro) ? edited.intro : [];
+  const questionsOut = edited.questions || {};
+  const uiOut = edited.ui || { showMeta: true };
+
+  const nodesOut = (Array.isArray(edited.nodes) ? edited.nodes : []).map(
+    (n) => {
+      const idOut = toNumericOrNull(n.id) ?? n.id;
+      const code = String(n.code ?? n.codigo ?? "").trim();
+      const [p1, p2, p3, p4, p5] = parseHierarchyParts(code);
+
+      const agrup_es =
+        n.agrupacion_es ??
+        findField(n, [
+          "agrupacion_es",
+          "agrupación_es",
+          "agrupacion_español",
+        ]) ??
+        null;
+
+      const observaciones =
+        n.observaciones ?? findField(n, ["observaciones", "obs"]) ?? null;
+
+      const nivel_aplicacion =
+        n.nivel_aplicacion ??
+        findField(n, ["nivel_aplicacion", "nivel_aplicación"]) ??
+        null;
+
+      const nivel_importancia =
+        n.nivel_importancia ??
+        findField(n, ["nivel_importancia", "nivel_importancia"]) ??
+        null;
+
+      const rawParent = n.parentId ?? n.parent ?? null;
+      const parentOut =
+        rawParent == null ? null : toNumericOrNull(rawParent) ?? rawParent;
+
+      return {
+        id: idOut,
+        1: p1,
+        2: p2,
+        3: p3,
+        4: p4,
+        5: p5,
+        tipo: mapTypeToOriginal(n.type),
+        codigo: code,
+        descripcion: n.desc ?? n.descripcion ?? "",
+        agrupacion_en: n.title ?? n.agrupacion_en ?? "",
+        agrupacion_es: agrup_es ?? null,
+        observaciones: observaciones ?? null,
+        nivel_aplicacion: nivel_aplicacion ?? null,
+        nivel_importancia: nivel_importancia ?? null,
+        parent: parentOut,
+      };
+    }
+  );
+
+  const out = {
+    meta: metaOut,
+    intro: introOut,
+    questions: questionsOut,
+    ui: uiOut,
+    nodes: nodesOut,
+  };
+
+  if (preserveScales && edited.scales) {
+    out.scales = edited.scales;
+  } else if (!preserveScales && edited.scales) {
+    out.scales = edited.scales;
+  }
+
+  return out;
+}
+
+/** Helpers escalas (pestaña Configuración) */
+
+function nextScaleKey(prefix, existing) {
+  const base = prefix.toUpperCase();
+  const nums = existing
+    .map((s) => Number(s.value))
+    .filter((n) => Number.isFinite(n));
+  const max = nums.length ? Math.max(...nums) : 0;
+  const next = max + 1;
+  return `${base}_${String(next).replace(".", "").replace(",", "")}`;
+}
 
 function baseHeaderDefs() {
   return [
@@ -280,1152 +859,31 @@ function ConfirmModal({
   );
 }
 
-function ColumnsModal({
-  open,
-  onClose,
-  columns,
-  setColumns,
-  nodes,
-  setNodes,
-  setDirty,
-  setStatus,
-}) {
-  const [editId, setEditId] = useState(null);
-  const [form, setForm] = useState({
-    label: "",
-    key: "",
-    type: "text",
-    appliesTo: "ALL",
-    editable: true,
-    optionsText: "",
-    formula: "",
-  });
-
-  useEffect(() => {
-    if (!open) return;
-    // reset selection each time opens
-    setEditId(null);
-    setForm({
-      label: "",
-      key: "",
-      type: "text",
-      appliesTo: "ALL",
-      editable: true,
-      optionsText: "",
-      formula: "",
-    });
-  }, [open]);
-
-  const selected = useMemo(
-    () => columns.find((c) => c.id === editId) || null,
-    [columns, editId]
-  );
-
-  function loadCol(id) {
-    const c = columns.find((x) => x.id === id);
-    if (!c) return;
-    setEditId(id);
-    setForm({
-      label: c.label || "",
-      key: c.key || "",
-      type: c.type || "text",
-      appliesTo: c.appliesTo || "ALL",
-      editable: c.editable !== false,
-      optionsText: (c.options || []).join(", "),
-      formula: c.formula || "",
-    });
-  }
-
-  function newCol() {
-    setEditId(null);
-    setForm({
-      label: "",
-      key: "",
-      type: "text",
-      appliesTo: "ALL",
-      editable: true,
-      optionsText: "",
-      formula: "",
-    });
-  }
-
-  function saveCol() {
-    const label = (form.label || "").trim();
-    const key = normalizeKey(form.key || label);
-    if (!label || !key) {
-      setStatus("bad", "Pon un label y un key válidos.");
-      return;
-    }
-
-    const exists = columns.find((c) => c.key === key && c.id !== editId);
-    if (exists) {
-      setStatus("bad", `Ya existe una columna con key ${key}.`);
-      return;
-    }
-
-    const type = form.type;
-    const options = (form.optionsText || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    if (type === "select" && options.length === 0) {
-      setStatus("bad", "Tipo select requiere al menos 1 opción.");
-      return;
-    }
-    if (type === "formula" && !String(form.formula || "").trim()) {
-      setStatus(
-        "bad",
-        "Tipo formula requiere una fórmula (ej: ={VI}*{VC}*{PESO})."
-      );
-      return;
-    }
-
-    const payload = {
-      id: key,
-      label,
-      key,
-      type,
-      appliesTo: form.appliesTo || "ALL",
-      editable: type === "formula" ? false : !!form.editable,
-      options,
-      formula: type === "formula" ? String(form.formula || "").trim() : "",
-    };
-
-    if (editId) {
-      const prevCol = columns.find((c) => c.id === editId);
-      const oldKey = prevCol?.key;
-      if (oldKey && oldKey !== key) {
-        setNodes((prev) =>
-          prev.map((n) => {
-            const cst = n.custom || {};
-            if (!Object.prototype.hasOwnProperty.call(cst, oldKey)) return n;
-            const custom = { ...cst, [key]: cst[oldKey] };
-            delete custom[oldKey];
-            return { ...n, custom };
-          })
-        );
-      }
-    }
-
-    setColumns((prev) => {
-      const next = [...prev];
-      const idx = next.findIndex((c) => c.id === editId);
-      if (idx >= 0) next[idx] = payload;
-      else next.push(payload);
-      return next;
-    });
-
-    setDirty(true);
-    setStatus("ok", "Columnas actualizadas.");
-    setEditId(payload.id);
-  }
-
-  function deleteCol() {
-    if (!selected) return;
-    const key = selected.key;
-
-    // UI: eliminación directa (sin alert). Usa status + confirm modal externo si quieres.
-    setColumns((prev) => prev.filter((c) => c.id !== selected.id));
-    setNodes((prev) =>
-      prev.map((n) => {
-        if (!n.custom) return n;
-        if (!Object.prototype.hasOwnProperty.call(n.custom, key)) return n;
-        const custom = { ...n.custom };
-        delete custom[key];
-        return { ...n, custom };
-      })
-    );
-
-    setDirty(true);
-    setStatus("warn", `Columna eliminada: ${selected.label}`);
-    newCol();
-  }
-
-  if (!open) return null;
-
-  const showOptions = form.type === "select";
-  const showFormula = form.type === "formula";
-
-  return (
-    <div
-      className={styles.modalBackdrop}
-      role="presentation"
-      onMouseDown={onClose}
-    >
-      <div
-        className={styles.modalWide}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Gestión de columnas"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <div className={styles.modalHeader}>
-          <div className={styles.modalTitle}>
-            Columnas (dinámicas + fórmulas)
-          </div>
-          <button
-            className={`${styles.btn} ${styles.tiny}`}
-            onClick={onClose}
-            type="button"
-          >
-            Cerrar
-          </button>
-        </div>
-
-        <div className={styles.modalBodyGrid}>
-          <div className={styles.colList}>
-            <div className={styles.colListHead}>Columnas personalizadas</div>
-            <div>
-              {columns.length === 0 ? (
-                <div className={styles.colItem} style={{ cursor: "default" }}>
-                  <div>
-                    <b style={{ color: "var(--text)" }}>Sin columnas</b>
-                    <br />
-                    <small>Crea la primera con “Nueva”.</small>
-                  </div>
-                </div>
-              ) : (
-                columns.map((c) => (
-                  <div
-                    key={c.id}
-                    className={`${styles.colItem} ${
-                      c.id === editId ? styles.colItemSelected : ""
-                    }`}
-                    onClick={() => loadCol(c.id)}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <div>
-                      <div>
-                        <b style={{ color: "var(--text)" }}>{c.label}</b>{" "}
-                        <small>({c.key})</small>
-                      </div>
-                      <small>
-                        {c.type} • aplica: {c.appliesTo} • editable:{" "}
-                        {c.editable ? "sí" : "no"}
-                      </small>
-                      {c.type === "formula" ? (
-                        <div style={{ marginTop: 6 }}>
-                          <small>ƒ {c.formula || ""}</small>
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className={styles.colActions}>
-                      <span className={styles.tag}>{c.type}</span>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-
-          <div>
-            <div className={styles.field}>
-              <div className={styles.label}>Nombre (label)</div>
-              <input
-                className={styles.cellInput}
-                value={form.label}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setForm((p) => ({
-                    ...p,
-                    label: v,
-                    key: p.key ? p.key : normalizeKey(v),
-                  }));
-                }}
-                placeholder="Ej: Evidencia"
-              />
-            </div>
-
-            <div className={styles.row2}>
-              <div className={styles.field}>
-                <div className={styles.label}>Nombre DB</div>
-                <input
-                  className={styles.cellInput}
-                  value={form.key}
-                  onChange={(e) =>
-                    setForm((p) => ({
-                      ...p,
-                      key: normalizeKey(e.target.value),
-                    }))
-                  }
-                  placeholder="EJ: EVIDENCIA"
-                />
-              </div>
-              <div className={styles.field}>
-                <div className={styles.label}>Tipo</div>
-                <select
-                  className={styles.cellSelect}
-                  value={form.type}
-                  onChange={(e) => {
-                    const t = e.target.value;
-                    setForm((p) => ({
-                      ...p,
-                      type: t,
-                      editable: t === "formula" ? false : p.editable,
-                    }));
-                  }}
-                >
-                  <option value="text">text</option>
-                  <option value="number">number</option>
-                  <option value="select">select</option>
-                  <option value="boolean">boolean</option>
-                  <option value="formula">formula</option>
-                </select>
-              </div>
-            </div>
-
-            <div className={styles.row2}>
-              <div className={styles.field}>
-                <div className={styles.label}>Aplica a</div>
-                <select
-                  className={styles.cellSelect}
-                  value={form.appliesTo}
-                  onChange={(e) =>
-                    setForm((p) => ({ ...p, appliesTo: e.target.value }))
-                  }
-                >
-                  <option value="ALL">ALL</option>
-                  <option value="GROUP">GROUP</option>
-                  <option value="ITEM">ITEM</option>
-                </select>
-              </div>
-              <div className={styles.field}>
-                <div className={styles.label}>Editable</div>
-                <select
-                  className={styles.cellSelect}
-                  value={String(!!form.editable)}
-                  onChange={(e) =>
-                    setForm((p) => ({
-                      ...p,
-                      editable: e.target.value === "true",
-                    }))
-                  }
-                  disabled={form.type === "formula"}
-                >
-                  <option value="true">Sí</option>
-                  <option value="false">No</option>
-                </select>
-              </div>
-            </div>
-
-            {showOptions ? (
-              <div className={styles.field}>
-                <div className={styles.label}>
-                  Opciones (select) — separa con comas
-                </div>
-                <textarea
-                  className={styles.cellInput}
-                  value={form.optionsText}
-                  onChange={(e) =>
-                    setForm((p) => ({ ...p, optionsText: e.target.value }))
-                  }
-                  placeholder="Alta, Media, Baja"
-                />
-              </div>
-            ) : null}
-
-            {showFormula ? (
-              <div className={styles.field}>
-                <div className={styles.label}>
-                  Fórmula (se exporta a Excel tal cual)
-                </div>
-                <input
-                  className={styles.cellInput}
-                  value={form.formula}
-                  onChange={(e) =>
-                    setForm((p) => ({ ...p, formula: e.target.value }))
-                  }
-                  placeholder="Ej: ={VI}*{VC}*{PESO}"
-                />
-                <div className={styles.hint} style={{ marginTop: 6 }}>
-                  Placeholders típicos: {"{VI}"}, {"{VC}"}, {"{PESO}"} y
-                  cualquier key de columna (ej. {"{SEVERIDAD}"}).
-                  <br />
-                  La app no calcula; Excel calcula al abrir el archivo.
-                </div>
-              </div>
-            ) : null}
-
-            <div className={styles.hint} style={{ marginTop: 8 }}>
-              Tip: usa key en MAYÚSCULAS sin espacios (EJ: EVIDENCIA, SEVERIDAD,
-              PUNTAJE).
-            </div>
-          </div>
-        </div>
-
-        <div className={styles.modalFooter}>
-          <button
-            className={`${styles.btn} ${styles.danger}`}
-            onClick={deleteCol}
-            disabled={!selected}
-            type="button"
-          >
-            Eliminar
-          </button>
-          <button className={styles.btn} onClick={newCol} type="button">
-            Nueva
-          </button>
-          <button
-            className={`${styles.btn} ${styles.primary}`}
-            onClick={saveCol}
-            type="button"
-          >
-            Guardar columna
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ====== ADAPTADOR ROBUSTO PARA JSON DINÁMICO (claves variadas) ======
-
-function stripDiacritics(s) {
-  try {
-    return String(s || "")
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "");
-  } catch {
-    return String(s || "");
-  }
-}
-
-function normFieldName(k) {
-  return stripDiacritics(k).toLowerCase().replace(/\s+/g, "_");
-}
-
-function parseJsonMaybe(x) {
-  if (typeof x !== "string") return x;
-  const t = x.trim();
-  if (!t) return {};
-  try {
-    return JSON.parse(t);
-  } catch {
-    return x;
-  }
-}
-
-function unwrapDataLayer(x) {
-  // Soporta: {data:{...}} o {file_json:{data:{...}}} etc
-  let p = x;
-  for (let i = 0; i < 3; i++) {
-    if (p && typeof p === "object" && p.data && typeof p.data === "object")
-      p = p.data;
-    else break;
-  }
-  return p;
-}
-
-function getAny(obj, candidates) {
-  if (!obj || typeof obj !== "object") return undefined;
-
-  // 1) match exact (case-sensitive)
-  for (const k of candidates) {
-    if (Object.prototype.hasOwnProperty.call(obj, k)) return obj[k];
-  }
-
-  // 2) match por nombre normalizado
-  const entries = Object.entries(obj);
-  const want = candidates.map(normFieldName);
-  for (const [k, v] of entries) {
-    const nk = normFieldName(k);
-    if (want.includes(nk)) return v;
-  }
-
-  return undefined;
-}
-
-function getByRegex(obj, regexes) {
-  if (!obj || typeof obj !== "object") return undefined;
-  const entries = Object.entries(obj);
-  for (const rx of regexes) {
-    for (const [k, v] of entries) {
-      const nk = normFieldName(k);
-      if (rx.test(nk)) return v;
-    }
-  }
-  return undefined;
-}
-
-function normalizeCode(code) {
-  const s = String(code ?? "").trim();
-  return s.replace(/\s+/g, " ").replace(/\.+$/g, ""); // quita puntos finales tipo "1.1."
-}
-
-function depthFromCode(code) {
-  const c = normalizeCode(code);
-  if (!c) return 0;
-  const parts = c.split(".").filter(Boolean);
-  return parts.length;
-}
-
-function parentCodeFromCode(code) {
-  const c = normalizeCode(code);
-  const parts = c.split(".").filter(Boolean);
-  if (parts.length <= 1) return "";
-  return parts.slice(0, -1).join(".");
-}
-
-function coerceBool(v, fallback = true) {
-  if (v === true || v === false) return v;
-  if (v === "true" || v === "false") return v === "true";
-  if (v === 1 || v === 0) return !!v;
-  return fallback;
-}
-
-function coerceNumber(v, fallback = 1) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function coerceType(rawType, depthHint = 0, hasChildren = false) {
-  const t = String(rawType ?? "")
-    .trim()
-    .toUpperCase();
-
-  // equivalencias comunes
-  if (t === "LEVEL" || t === "NIVEL" || t === "N") return "LEVEL";
-  if (
-    t === "GROUP" ||
-    t === "GRUPO" ||
-    t === "AGRUPACION" ||
-    t === "AGRUPACIÓN" ||
-    t === "G"
-  )
-    return "GROUP";
-  if (
-    t === "ITEM" ||
-    t === "ITEMS" ||
-    t === "I" ||
-    t === "A" ||
-    t === "CRITERIO" ||
-    t === "PREGUNTA"
-  )
-    return "ITEM";
-
-  // inferencia por jerarquía (si no viene tipo)
-  if (depthHint === 1) return "LEVEL";
-  if (hasChildren) return "GROUP";
-  return "ITEM";
-}
-
-function coerceViKey(scales, raw) {
-  // acepta "VI_3" o 3
-  const s = String(raw ?? "").trim();
-  if (!s) return "VI_3";
-  if (/^VI_\d+$/i.test(s)) return s.toUpperCase();
-  const n = Number(raw);
-  if (Number.isFinite(n)) {
-    const k = `VI_${Math.max(1, Math.min(5, Math.round(n)))}`;
-    const exists = (scales?.VI || []).some((x) => x.key === k);
-    return exists ? k : "VI_3";
-  }
-  return "VI_3";
-}
-
-function coerceVcKey(scales, raw) {
-  const s = String(raw ?? "").trim();
-  if (!s) return "VC_1";
-  if (/^VC_\d+$/i.test(s) || /^VC_0?5$/i.test(s))
-    return s.toUpperCase().replace("VC_05", "VC_05");
-  const n = Number(raw);
-  if (Number.isFinite(n)) {
-    if (n === 1) return "VC_1";
-    if (n === 0.5) return "VC_05";
-    if (n === 0) return "VC_0";
-  }
-  return "VC_1";
-}
-
-function normalizeColumnsAny(payload) {
-  const rawCols =
-    (Array.isArray(payload?.columns) && payload.columns) ||
-    (Array.isArray(payload?.columnas) && payload.columnas) ||
-    (Array.isArray(payload?.cols) && payload.cols) ||
-    [];
-
-  return rawCols
-    .map((c) => {
-      const label = String(
-        getAny(c, ["label", "nombre", "titulo", "título"]) ?? c.key ?? ""
-      ).trim();
-
-      const key = normalizeKey(getAny(c, ["key", "clave", "campo"]) ?? label);
-
-      const type = String(getAny(c, ["type", "tipo"]) ?? "text").toLowerCase();
-
-      const appliesTo = String(
-        getAny(c, ["appliesTo", "aplica_a", "aplica"]) ?? "ALL"
-      ).toUpperCase();
-
-      const editable = coerceBool(
-        getAny(c, ["editable", "edit", "es_editable"]),
-        true
-      );
-
-      const optionsRaw = getAny(c, ["options", "opciones", "vals", "values"]);
-      const options = Array.isArray(optionsRaw) ? optionsRaw.map(String) : [];
-
-      const formula = String(getAny(c, ["formula", "fórmula"]) ?? "").trim();
-      const stableId = String(c.id || c.key || key); // 👈 estable
-
-      return {
-        id: stableId,
-        label: label || key,
-        key,
-        type: ["text", "number", "select", "boolean", "formula"].includes(type)
-          ? type
-          : "text",
-        appliesTo: ["ALL", "LEVEL", "GROUP", "ITEM"].includes(appliesTo)
-          ? appliesTo
-          : "ALL",
-        editable: type === "formula" ? false : !!editable,
-        options,
-        formula: type === "formula" ? formula : formula || "",
-      };
-    })
-    .filter((c) => c.key);
-}
-
-function flattenTreeAny(treeArray, scales) {
-  const out = [];
-  const walk = (node, parentId, depth) => {
-    const kids =
-      getAny(node, ["children", "hijos", "nodes", "items"]) ||
-      getByRegex(node, [/^children$/, /^hijos$/, /^nodes$/, /^items$/]) ||
-      [];
-    const hasChildren = Array.isArray(kids) && kids.length > 0;
-
-    const rawCode =
-      getAny(node, ["code", "codigo", "código"]) ??
-      getByRegex(node, [/^code$/, /codigo/]);
-
-    const rawTitle =
-      getAny(node, [
-        "title",
-        "titulo",
-        "título",
-        "enunciado",
-        "nombre",
-        "name",
-        "label",
-        "agrupacion",
-        "agrupación",
-      ]) ??
-      getByRegex(node, [
-        /enunciado/,
-        /titulo/,
-        /title/,
-        /nombre/,
-        /label/,
-        /agrup/,
-      ]);
-
-    const rawType =
-      getAny(node, ["type", "tipo", "kind"]) ??
-      getByRegex(node, [/^type$/, /^tipo$/, /kind/]);
-
-    const code = String(rawCode ?? "").trim();
-    const title = String(rawTitle ?? "").trim();
-
-    out.push({
-      id: node.id || uuid(),
-      type: coerceType(rawType, depth, hasChildren),
-      code,
-      title,
-      desc: String(
-        getAny(node, ["desc", "descripcion", "descripción", "ayuda", "help"]) ??
-          ""
-      ),
-      parentId:
-        parentId == null || parentId === ""
-          ? null
-          : typeof parentId === "string" || typeof parentId === "number"
-          ? String(parentId)
-          : null,
-
-      viKey: coerceViKey(
-        scales,
-        getAny(node, [
-          "viKey",
-          "vi",
-          "vi_key",
-          "nivel_importancia",
-          "importancia",
-        ])
-      ),
-      vcKey: coerceVcKey(
-        scales,
-        getAny(node, ["vcKey", "vc", "vc_key", "aplica"])
-      ),
-      weight: coerceNumber(getAny(node, ["weight", "peso"]), 1),
-      required: coerceBool(getAny(node, ["required", "requerido"]), true),
-      active: coerceBool(getAny(node, ["active", "activo"]), true),
-      order: coerceNumber(getAny(node, ["order", "orden"]), out.length * 10),
-      custom: node.custom && typeof node.custom === "object" ? node.custom : {},
-    });
-
-    if (hasChildren) {
-      const thisId = out[out.length - 1].id;
-      kids.forEach((k) => walk(k, thisId, depth + 1));
-    }
-  };
-
-  (treeArray || []).forEach((n) => walk(n, null, 1));
-  return out;
-}
-
-function normalizeNodesAny(payload, scales) {
-  // 1) ya viene en flat nodes
-  const rawNodes =
-    (Array.isArray(payload?.nodes) && payload.nodes) ||
-    (Array.isArray(payload?.nodos) && payload.nodos) ||
-    (Array.isArray(payload?.items) && payload.items) ||
-    null;
-
-  // 2) viene como tree
-  const rawTree =
-    (!rawNodes && Array.isArray(payload?.tree) && payload.tree) ||
-    (!rawNodes && Array.isArray(payload?.estructura) && payload.estructura) ||
-    (!rawNodes && Array.isArray(payload?.structure) && payload.structure) ||
-    null;
-
-  let nodes = [];
-
-  if (rawNodes) {
-    nodes = rawNodes.map((n, idx) => {
-      const rawCode =
-        getAny(n, ["code", "codigo", "código"]) ??
-        getByRegex(n, [/^code$/, /codigo/]);
-
-      const rawTitle =
-        getAny(n, [
-          "title",
-          "titulo",
-          "título",
-          "enunciado",
-          "nombre",
-          "name",
-          "label",
-          "agrupacion",
-          "agrupación",
-        ]) ??
-        getByRegex(n, [
-          /enunciado/,
-          /titulo/,
-          /title/,
-          /nombre/,
-          /label/,
-          /agrup/,
-        ]);
-
-      const rawType =
-        getAny(n, ["type", "tipo", "kind"]) ??
-        getByRegex(n, [/^type$/, /^tipo$/, /kind/]);
-
-      const rawParent =
-        getAny(n, [
-          "parentId",
-          "parent_id",
-          "padre",
-          "padreId",
-          "id_padre",
-          "parent",
-        ]) ?? getByRegex(n, [/parent/, /padre/]);
-
-      const code = String(rawCode ?? "").trim();
-      const title = String(rawTitle ?? "").trim();
-
-      const depth = depthFromCode(code);
-      const type = coerceType(rawType, depth, false);
-      const { custom: _custom, children, hijos, ...rest } = n || {};
-      const customObj = _custom && typeof _custom === "object" ? _custom : {};
-
-      return {
-        id: n.id || getAny(n, ["uuid", "ID", "Id"]) || uuid(),
-        type,
-        code,
-        title,
-        desc: String(
-          getAny(n, ["desc", "descripcion", "descripción", "ayuda", "help"]) ??
-            ""
-        ),
-        parentId:
-          rawParent == null || rawParent === ""
-            ? null
-            : typeof rawParent === "string" || typeof rawParent === "number"
-            ? String(rawParent)
-            : null,
-
-        viKey: coerceViKey(
-          scales,
-          getAny(n, [
-            "viKey",
-            "vi",
-            "vi_key",
-            "nivel_importancia",
-            "importancia",
-          ])
-        ),
-        vcKey: coerceVcKey(
-          scales,
-          getAny(n, ["vcKey", "vc", "vc_key", "aplica"])
-        ),
-        weight: coerceNumber(getAny(n, ["weight", "peso"]), 1),
-        required: coerceBool(getAny(n, ["required", "requerido"]), true),
-        active: coerceBool(getAny(n, ["active", "activo"]), true),
-        order: coerceNumber(getAny(n, ["order", "orden"]), (idx + 1) * 10),
-        custom: n.custom && typeof n.custom === "object" ? n.custom : {},
-      };
-    });
-  } else if (rawTree) {
-    nodes = flattenTreeAny(rawTree, scales);
-  }
-
-  // 3) Si no hay nodes/tree, intenta derivar de "rows"/"checklist"
-  if (nodes.length === 0) {
-    const rows =
-      (Array.isArray(payload?.rows) && payload.rows) ||
-      (Array.isArray(payload?.checklist) && payload.checklist) ||
-      (Array.isArray(payload?.data) && payload.data) ||
-      [];
-
-    if (Array.isArray(rows) && rows.length) {
-      const mapCodeToId = new Map();
-
-      nodes = rows.map((r, idx) => {
-        const code = String(
-          getAny(r, ["code", "codigo", "código"]) ??
-            getByRegex(r, [/^code$/, /codigo/]) ??
-            ""
-        ).trim();
-
-        const title = String(
-          getAny(r, [
-            "title",
-            "titulo",
-            "título",
-            "enunciado",
-            "agrupacion",
-            "agrupación",
-            "nombre",
-            "name",
-            "label",
-          ]) ??
-            getByRegex(r, [
-              /enunciado/,
-              /titulo/,
-              /title/,
-              /agrup/,
-              /nombre/,
-              /label/,
-            ]) ??
-            ""
-        ).trim();
-
-        const depth = depthFromCode(code);
-        const rawType =
-          getAny(r, ["type", "tipo"]) ?? getByRegex(r, [/^type$/, /^tipo$/]);
-        const type = coerceType(rawType, depth, false);
-
-        const id = uuid();
-        mapCodeToId.set(normalizeCode(code), id);
-
-        return {
-          id,
-          type,
-          code,
-          title,
-          desc: String(
-            getAny(r, [
-              "desc",
-              "descripcion",
-              "descripción",
-              "observaciones",
-              "obs",
-            ]) ?? ""
-          ),
-          parentId: null, // se resuelve abajo por código
-          viKey: coerceViKey(
-            scales,
-            getAny(r, ["viKey", "vi", "nivel_importancia", "importancia"])
-          ),
-          vcKey: coerceVcKey(scales, getAny(r, ["vcKey", "vc", "aplica"])),
-          weight: coerceNumber(getAny(r, ["weight", "peso"]), 1),
-          required: coerceBool(getAny(r, ["required", "requerido"]), true),
-          active: coerceBool(getAny(r, ["active", "activo"]), true),
-          order: (idx + 1) * 10,
-          custom: {},
-        };
-      });
-
-      // parent por código (ej: 1.1.1 -> 1.1)
-      nodes = nodes.map((n) => {
-        const pc = parentCodeFromCode(n.code);
-        if (!pc) return n;
-        const pid = mapCodeToId.get(normalizeCode(pc));
-        return pid ? { ...n, parentId: pid } : n;
-      });
-    }
-  }
-
-  // Resolver parentId si venía como "código" en vez de UUID
-  if (nodes.length) {
-    const idSet = new Set(nodes.map((n) => n.id));
-    const byCode = new Map(
-      nodes.filter((n) => n.code).map((n) => [normalizeCode(n.code), n.id])
-    );
-
-    nodes = nodes.map((n) => {
-      if (!n.parentId) return n;
-      if (idSet.has(n.parentId)) return n;
-
-      const maybe = byCode.get(normalizeCode(n.parentId));
-      return maybe ? { ...n, parentId: maybe } : n;
-    });
-  }
-
-  return nodes;
-}
-
-function adaptEditorPayload(raw, fallbackScales) {
-  const parsed = unwrapDataLayer(parseJsonMaybe(raw));
-  const payload = parsed && typeof parsed === "object" ? parsed : {};
-
-  const scales = payload.scales || payload.escalas || fallbackScales;
-
-  const meta =
-    payload.meta || payload.form || payload.datos || payload.metadata || {};
-
-  const intro = Array.isArray(payload.intro)
-    ? payload.intro
-    : Array.isArray(payload.introduccion)
-    ? payload.introduccion
-    : [];
-
-  const questions = payload.questions || payload.preguntas || {};
-
-  const ui = payload.ui || { showMeta: true };
-
-  const columns = normalizeColumnsAny(payload);
-  const nodes = normalizeNodesAny(payload, scales);
-
-  const selectedIdRaw =
-    payload.selectedId || payload.selected_id || payload.seleccion || null;
-
-  const selectedId =
-    selectedIdRaw && nodes.some((n) => n.id === selectedIdRaw)
-      ? selectedIdRaw
-      : nodes[0]?.id || null;
-
-  const warning =
-    nodes.length === 0
-      ? "No encontré nodos en el JSON (revisa la forma del payload)."
-      : "";
-
-  return {
-    meta,
-    intro,
-    questions,
-    scales,
-    ui,
-    columns,
-    nodes,
-    selectedId,
-    warning,
-  };
-}
-
-function mapTypeToOriginal(t) {
-  if (!t) return null;
-  if (String(t).toUpperCase() === "GROUP") return "G";
-  if (String(t).toUpperCase() === "ITEM") return "A";
-  return String(t).toUpperCase();
-}
-
-// parse "1.1.2.3." -> [1,1,2,3,null]
-function parseHierarchyParts(code) {
-  const c = normalizeCode(code || "");
-  if (!c) return [null, null, null, null, null];
-  const parts = c
-    .split(".")
-    .filter(Boolean)
-    .map((p) => {
-      const n = Number(p);
-      return Number.isFinite(n) ? n : null;
-    });
-  const out = [null, null, null, null, null];
-  for (let i = 0; i < Math.min(5, parts.length); i++) out[i] = parts[i];
-  return out;
-}
-
-// busca claves similares (normalizadas) dentro de custom u objeto
-function findField(o, candidates) {
-  if (!o || typeof o !== "object") return undefined;
-  for (const k of candidates) {
-    if (Object.prototype.hasOwnProperty.call(o, k)) return o[k];
-  }
-  const entries = Object.entries(o);
-  const want = candidates.map(normFieldName);
-  for (const [k, v] of entries) {
-    if (want.includes(normFieldName(k))) return v;
-  }
-  return undefined;
-}
-
-/*
-  Serializa el estado del editor al "formato original" esperado.
-  - edited: objeto con campos meta,intro,questions,scales,ui,columns,nodes
-  - options.preserveScales: si true, incluye scales en la salida (si el archivo original lo tenía)
-*/
-function editedToOriginal(edited, options = {}) {
-  const preserveScales = !!options.preserveScales;
-
-  const metaOut = edited.meta || {};
-  const introOut = Array.isArray(edited.intro) ? edited.intro : [];
-  const questionsOut = edited.questions || {};
-  const uiOut = edited.ui || { showMeta: true };
-
-  // columns -> formato original: { key, type, label }
-  const colsOut = (Array.isArray(edited.columns) ? edited.columns : []).map(
-    (c) => {
-      const keyLow = String(c.key || c.id || "").toLowerCase();
-      // map type: mantén tipo simple (number/text/longtext) - adaptalo si necesitas otros mapeos
-      const type =
-        c.type === "number"
-          ? "number"
-          : c.type === "formula"
-          ? "text"
-          : c.type === "select"
-          ? "text"
-          : c.type === "boolean"
-          ? "text"
-          : "text";
-      return {
-        key: keyLow,
-        type,
-        label: c.label || c.key || "",
-      };
-    }
-  );
-
-  // nodes: mapear cada nodo al esquema original
-  // nodes: mapear cada nodo al esquema original
-  const nodesOut = (Array.isArray(edited.nodes) ? edited.nodes : []).map(
-    (n) => {
-      const idOut = toNumericOrNull(n.id) ?? n.id;
-      const code = String(n.code ?? n.codigo ?? "").trim();
-      const [p1, p2, p3, p4, p5] = parseHierarchyParts(code);
-
-      // intentar recuperar agrupacion_es / observaciones / nivel_* de custom u otros campos conservados
-      const agrup_es =
-        n.agrupacion_es ??
-        findField(n, [
-          "agrupacion_es",
-          "agrupación_es",
-          "agrupacion_español",
-        ]) ??
-        findField(n.custom || {}, [
-          "AGRUPACION_ES",
-          "agrupacion_es",
-          "agrupacion_español",
-        ]) ??
-        null;
-
-      const observaciones =
-        n.observaciones ??
-        findField(n, ["observaciones", "obs"]) ??
-        findField(n.custom || {}, ["OBSERVACIONES", "observaciones", "obs"]) ??
-        null;
-
-      const nivel_aplicacion =
-        n.nivel_aplicacion ??
-        findField(n, ["nivel_aplicacion", "nivel_aplicación"]) ??
-        null;
-
-      const nivel_importancia =
-        n.nivel_importancia ??
-        findField(n, ["nivel_importancia", "nivel_importancia"]) ??
-        null;
-
-      // --- NUEVO: preservar referencia al padre al exportar ---
-      // si parentId es numérico sacamos número, si no lo dejamos como string (uuid o código)
-      const rawParent = n.parentId ?? n.parent ?? null;
-      const parentOut =
-        rawParent == null ? null : toNumericOrNull(rawParent) ?? rawParent;
-
-      return {
-        id: idOut,
-        1: p1,
-        2: p2,
-        3: p3,
-        4: p4,
-        5: p5,
-        tipo: mapTypeToOriginal(n.type),
-        codigo: code,
-        descripcion: n.desc ?? n.descripcion ?? "",
-        agrupacion_en: n.title ?? n.agrupacion_en ?? "",
-        agrupacion_es: agrup_es ?? null,
-        observaciones: observaciones ?? null,
-        nivel_aplicacion: nivel_aplicacion ?? null,
-        nivel_importancia: nivel_importancia ?? null,
-
-        // exportar referencia al padre para no perder jerarquía
-        parentId: parentOut,
-        parent: parentOut,
-      };
-    }
-  );
-
-  const out = {
-    meta: metaOut,
-    intro: introOut,
-    questions: questionsOut,
-    ui: uiOut,
-    columns: colsOut,
-    nodes: nodesOut,
-  };
-
-  if (preserveScales && edited.scales) {
-    // si el archivo original tenía scales, las movemos tal cual (para no perder info)
-    out.scales = edited.scales;
-  }
-
-  return out;
-}
-
 export default function FileDetail() {
   const { fileId } = useParams();
   const navigate = useNavigate();
-  const { token, user } = useContext(AuthContext);
+  const { token } = useContext(AuthContext);
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [file, setFile] = useState(null);
 
-  // Core editor state (dinámico desde JSON)
   const [meta, setMeta] = useState({});
   const [intro, setIntro] = useState([]);
   const [questions, setQuestions] = useState({});
   const [scales, setScales] = useState(DEFAULT_SCALES);
-  const [columns, setColumns] = useState([]);
   const [nodes, setNodes] = useState([]);
   const [ui, setUi] = useState({ showMeta: true });
-  const nextIdRef = useRef(1); // generador incremental de IDs numéricos
+  const nextIdRef = useRef(1);
 
   const [selectedId, setSelectedId] = useState(null);
-  const [search, setSearch] = useState("");
+  const [search] = useState(""); // búsqueda ya no visible en la UI de plantilla
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // Status/log
   const [statusKind, setStatusKind] = useState("");
   const [statusMsg, setStatusMsg] = useState("—");
 
-  // Modals
-  const [colsOpen, setColsOpen] = useState(false);
   const [confirm, setConfirm] = useState({
     open: false,
     title: "",
@@ -1435,10 +893,12 @@ export default function FileDetail() {
     onConfirm: null,
   });
 
-  // Inspector (draft, con aplicar/revertir)
   const [draft, setDraft] = useState(null);
   const draftRef = useRef(null);
   draftRef.current = draft;
+
+  // pestaña activa
+  const [activeTab, setActiveTab] = useState("presentation"); // 'presentation' | 'config' | 'template'
 
   function setStatus(kind, msg) {
     setStatusKind(kind || "");
@@ -1447,10 +907,8 @@ export default function FileDetail() {
 
   function resolveParentInput(input) {
     if (input == null || input === "") return null;
-    // buscar nodo con id coincidente (String)
     const found = nodes.find((n) => String(n.id) === String(input));
     if (found) return found.id;
-    // fallback: si input es numérico, devolver número
     const maybe = toNumericOrNull(input);
     return maybe !== null ? maybe : input;
   }
@@ -1459,7 +917,6 @@ export default function FileDetail() {
     if (msg) setStatus("warn", msg);
   }
 
-  // Load file
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -1484,39 +941,29 @@ export default function FileDetail() {
   useEffect(() => {
     if (!file) return;
 
-    // 1) toma lo que venga del backend
     const raw0 = file?.file_json ?? file?.data ?? file ?? {};
     const raw = parseJsonMaybe(raw0);
 
-    // 2) adapta a tu modelo del editor (aunque venga con claves distintas)
     const {
       meta: m,
       intro: i,
       questions: q,
       scales: sc,
       ui: u,
-      columns: cols,
       nodes: nds,
       selectedId: sel,
       warning,
     } = adaptEditorPayload(raw, DEFAULT_SCALES);
-    const nodesWithCustom = mergeCustomFromRoot(nds, cols);
-
-    //    y luego usa nodesWithCustom en lugar de nds para normalizar IDs:
 
     setMeta(m || {});
     setIntro(Array.isArray(i) ? i : []);
     setQuestions(q || {});
     setScales(sc || DEFAULT_SCALES);
 
-    // columnas
-    setColumns(Array.isArray(cols) ? cols : []);
-
-    // nodos: normaliza IDs a numéricos y ajusta el contador
     let counter = 1;
-    const normalizedNodes = (
-      Array.isArray(nodesWithCustom) ? nodesWithCustom : []
-    ).map((n) => normalizeNodeIds(n, () => counter++));
+    const normalizedNodes = (Array.isArray(nds) ? nds : []).map((n) =>
+      normalizeNodeIds(n, () => counter++)
+    );
     const maxId = normalizedNodes.reduce(
       (m, n) => (Number.isFinite(n.id) ? Math.max(m, n.id) : m),
       0
@@ -1531,19 +978,15 @@ export default function FileDetail() {
     if (warning) {
       setStatus("warn", warning);
     } else {
-      setStatus(
-        "",
-        "Listo. Crea columnas en “Columnas”. Fórmulas se exportan a Excel para que Excel las calcule."
-      );
+      setStatus("", "Editor listo.");
     }
   }, [file]);
-  // Selected node
+
   const selectedNode = useMemo(
     () => nodes.find((n) => n.id === selectedId) || null,
     [nodes, selectedId]
   );
 
-  // Sync draft on selection change
   useEffect(() => {
     if (!selectedNode) {
       setDraft(null);
@@ -1561,10 +1004,10 @@ export default function FileDetail() {
       weight: selectedNode.weight,
       required: String(!!selectedNode.required),
       active: String(!!selectedNode.active),
+      observaciones: selectedNode.observaciones || "",
     });
-  }, [selectedNode?.id]); // solo al cambiar la selección
+  }, [selectedNode?.id]);
 
-  // Tree build
   const byParent = useMemo(() => {
     const map = new Map();
     for (const n of nodes) {
@@ -1579,10 +1022,8 @@ export default function FileDetail() {
 
   const roots = useMemo(() => byParent.get("__root__") || [], [byParent]);
 
-  // Filtered table rows
   const deferredSearch = useDeferredValue(search);
 
-  // O(1) lookup for parent labels (stringify to avoid id-type mismatches)
   const nodesById = useMemo(() => {
     const m = new Map();
     for (const n of nodes) m.set(String(n.id), n);
@@ -1647,11 +1088,6 @@ export default function FileDetail() {
     markDirty(msg);
   }
 
-  function setSelected(id) {
-    setSelectedId(id);
-  }
-
-  // CRUD nodes (sin prompts; todo editable luego)
   function addNode(type) {
     const selected = nodes.find((n) => n.id === selectedId) || null;
 
@@ -1676,7 +1112,7 @@ export default function FileDetail() {
       required: true,
       active: true,
       order: nextOrderForParent(parentId),
-      custom: {},
+      observaciones: "",
     };
 
     setNodes((prev) => [...prev, node]);
@@ -1777,24 +1213,15 @@ export default function FileDetail() {
       "Padre actualizado."
     );
   }
-  // Meta toggle
+
   function toggleMeta() {
     setUi((p) => ({ ...p, showMeta: !p.showMeta }));
     markDirty();
   }
 
-  // Validate
   function validate() {
     const errors = [];
 
-    // keys de columnas únicas
-    const keys = new Set();
-    for (const c of columns) {
-      if (keys.has(c.key)) errors.push(`Columna con key duplicada: ${c.key}`);
-      keys.add(c.key);
-    }
-
-    // códigos únicos si existen
     const codes = new Map();
     for (const n of nodes) {
       const c = (n.code || "").trim();
@@ -1804,7 +1231,6 @@ export default function FileDetail() {
       else codes.set(c, n.id);
     }
 
-    // ciclos
     for (const n of nodes) {
       if (n.parentId && isDescendant(n.id, n.parentId)) {
         errors.push(`Jerarquía inválida: ciclo detectado en ${nodeLabel(n)}`);
@@ -1812,7 +1238,6 @@ export default function FileDetail() {
       }
     }
 
-    // regla simple: ITEM no puede tener padre ITEM (si quieres mantener el modelo del mock)
     const lookup = new Map(nodes.map((n) => [n.id, n]));
     for (const n of nodes) {
       if (!n.parentId) continue;
@@ -1847,13 +1272,11 @@ export default function FileDetail() {
     return true;
   }
 
-  // Save backend
   async function handleSave() {
     if (!validate()) return;
 
     setSaving(true);
     try {
-      // detecta si el archivo original venía empaquetado en { data: {...} }
       const rawFileJson = parseJsonMaybe(file?.file_json ?? null) || {};
       const hasDataLayer =
         rawFileJson && typeof rawFileJson === "object" && rawFileJson.data;
@@ -1861,7 +1284,6 @@ export default function FileDetail() {
         (rawFileJson && rawFileJson.scales) ||
         (rawFileJson && rawFileJson.data && rawFileJson.data.scales);
 
-      // serializa el estado del editor al formato original
       const dataObj = editedToOriginal(
         {
           meta,
@@ -1869,7 +1291,6 @@ export default function FileDetail() {
           questions,
           scales,
           ui,
-          columns,
           nodes,
         },
         { preserveScales: !!originalHadScales }
@@ -1891,9 +1312,7 @@ export default function FileDetail() {
     }
   }
 
-  // Export JSON (cliente)
   function handleExportJson() {
-    // exporta en la forma original (envuelta en { data: ... } para compatibilidad)
     const dataObj = editedToOriginal(
       {
         meta,
@@ -1901,35 +1320,24 @@ export default function FileDetail() {
         questions,
         scales,
         ui,
-        columns,
         nodes,
       },
-      { preserveScales: !!scales } // opcional: incluye scales si existen en el editor
+      { preserveScales: !!scales }
     );
 
-    // Mantener la envoltura { data: ... } para que sea idéntico a formato original mostrado en tu ejemplo
     downloadJSON(`${safeFilename(file?.name || "checklist")}.json`, {
       data: dataObj,
     });
     setStatus("ok", "Exportado a JSON.");
   }
 
-  // Export Excel (backend)
-  // Reemplaza la función handleExportExcel existente por esta versión.
   async function handleExportExcel() {
     try {
-      // Si hay cambios locales, intenta guardarlos antes de exportar
       if (dirty) {
         setStatus("warn", "Guardando cambios antes de exportar…");
-
-        // Llama a handleSave (que hace validate() y guarda). Esperamos su fin.
         try {
           await handleSave();
-        } catch (err) {
-          // handleSave maneja errores y setea status; aquí no hacemos más.
-        }
-
-        // Si sigue habiendo cambios (dirty === true) abortamos la exportación.
+        } catch (err) {}
         if (dirty) {
           setStatus(
             "bad",
@@ -1956,7 +1364,6 @@ export default function FileDetail() {
     }
   }
 
-  // Inspector apply/revert
   function applyInspector() {
     if (!draft || !selectedNode) return;
 
@@ -1992,6 +1399,7 @@ export default function FileDetail() {
           order: parentChanged ? nextOrderForParent(newParentId) : n.order,
           required: draft.required === "true",
           active: draft.active === "true",
+          observaciones: draft.observaciones || "",
         };
       })
     );
@@ -2013,30 +1421,16 @@ export default function FileDetail() {
       weight: selectedNode.weight,
       required: String(!!selectedNode.required),
       active: String(!!selectedNode.active),
+      observaciones: selectedNode.observaciones || "",
     });
     setStatus("warn", "Inspector revertido.");
   }
 
-  // Inspector extra fields (custom columns)
-  function setCustomValue(nodeId, key, value) {
-    setNodes((prev) =>
-      prev.map((n) => {
-        if (n.id !== nodeId) return n;
-        const custom = { ...(n.custom || {}) };
-        custom[key] = value;
-        return { ...n, custom };
-      })
-    );
-    markDirty();
-  }
-
-  // Meta update
   function updateMeta(key, value) {
     setMeta((prev) => ({ ...prev, [key]: value }));
     markDirty();
   }
 
-  // Meta keys order (dinámico)
   const metaKeys = useMemo(() => {
     const keys = Object.keys(meta || {});
     const order = [
@@ -2053,14 +1447,11 @@ export default function FileDetail() {
     return [...ordered, ...rest];
   }, [meta]);
 
-  // Allowed parents (LEVEL/GROUP)
   const allowedParents = useMemo(() => {
     return nodes
       .filter((n) => n.type === TYPES.LEVEL || n.type === TYPES.GROUP)
       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   }, [nodes]);
-
-  // Render tree recursively
 
   const selectionPill = selectedNode
     ? `Selección: ${nodeLabel(selectedNode)}`
@@ -2069,6 +1460,52 @@ export default function FileDetail() {
 
   const headerBase = baseHeaderDefs();
 
+  function updateScale(kind, index, field, value) {
+    setScales((prev) => {
+      const list = [...(prev?.[kind] || [])];
+      const item = { ...list[index], [field]: value };
+      if (field === "value") {
+        const n = Number(value);
+        item.value = Number.isFinite(n) ? n : "";
+      }
+      const others = list.filter((_, i) => i !== index);
+      const existsSameValue = others.some((s) => s.value === item.value);
+      if (!existsSameValue && typeof item.value === "number") {
+        const base = kind.toUpperCase();
+        item.key = `${base}_${String(item.value)
+          .replace(".", "")
+          .replace(",", "")}`;
+      }
+      list[index] = item;
+      return { ...prev, [kind]: list };
+    });
+    markDirty();
+  }
+
+  function addScaleRow(kind) {
+    setScales((prev) => {
+      const list = prev?.[kind] || [];
+      const key = nextScaleKey(kind, list);
+      const next = [
+        ...list,
+        { key, label: "Nueva opción", value: list.length + 1 },
+      ];
+      return { ...prev, [kind]: next };
+    });
+    markDirty("Añadida opción de escala.");
+  }
+
+  function removeScaleRow(kind, index) {
+    setScales((prev) => {
+      const list = [...(prev?.[kind] || [])];
+      list.splice(index, 1);
+      return { ...prev, [kind]: list };
+    });
+    markDirty("Eliminada opción de escala.");
+  }
+
+  const derivedName = file?.name || "Checklist";
+
   return (
     <div className={styles.page}>
       <header className={styles.header}>
@@ -2076,9 +1513,9 @@ export default function FileDetail() {
           <div className={styles.brand}>
             <div className={styles.logo} />
             <div>
-              <div className={styles.title}>Checklist v2 — Editor</div>
+              <div className={styles.title}>{derivedName}</div>
               <div className={styles.subtitle}>
-                Plantilla editable • Columnas dinámicas • Fórmulas para export
+                Presentación • Configuración • Plantilla
               </div>
             </div>
           </div>
@@ -2122,18 +1559,6 @@ export default function FileDetail() {
             Exportar JSON
           </button>
 
-          <div className={styles.userbox} title="Usuario">
-            <div className={styles.avatar}>
-              {(user?.name?.[0] || user?.email?.[0] || "U").toUpperCase()}
-            </div>
-            <div className={styles.usermeta}>
-              <div className={styles.username}>{user?.name || "Usuario"}</div>
-              <div className={styles.userrole}>
-                {user?.role ? `${user.role}` : "—"}
-              </div>
-            </div>
-          </div>
-
           <button
             className={`${styles.btn} ${styles.tiny}`}
             onClick={() => navigate(-1)}
@@ -2142,904 +1567,519 @@ export default function FileDetail() {
             ← Volver
           </button>
         </div>
+
+        {/* TABS */}
+        <div className={styles.tabs}>
+          <button
+            type="button"
+            className={`${styles.tab} ${
+              activeTab === "presentation" ? styles.tabActive : ""
+            }`}
+            onClick={() => setActiveTab("presentation")}
+          >
+            1. Presentación
+          </button>
+          <button
+            type="button"
+            className={`${styles.tab} ${
+              activeTab === "config" ? styles.tabActive : ""
+            }`}
+            onClick={() => setActiveTab("config")}
+          >
+            2. Configuración VI/VC
+          </button>
+          <button
+            type="button"
+            className={`${styles.tab} ${
+              activeTab === "template" ? styles.tabActive : ""
+            }`}
+            onClick={() => setActiveTab("template")}
+          >
+            3. Plantilla
+          </button>
+        </div>
       </header>
 
-      <main className={styles.layout}>
-        {/* LEFT: Tree */}
-        <section className={styles.panel} aria-label="Árbol">
-          <div className={styles.panelHeader}>Estructura</div>
+      {/* PRESENTACIÓN */}
+      {activeTab === "presentation" && (
+        <main className={styles.presentation}>
+          <section className={styles.panelWide}>
+            <h2 className={styles.sectionTitle}>Presentación</h2>
 
-          <div className={styles.treeActions}>
-            <button
-              className={styles.btn}
-              onClick={() => addNode(TYPES.GROUP)}
-              type="button"
-            >
-              + Agrupación
-            </button>
-            <button
-              className={styles.btn}
-              onClick={() => addNode(TYPES.ITEM)}
-              type="button"
-            >
-              + Ítem
-            </button>
-            <button
-              className={`${styles.btn} ${styles.danger}`}
-              onClick={() => selectedId && requestDelete(selectedId)}
-              type="button"
-              disabled={!selectedId}
-            >
-              Eliminar
-            </button>
-          </div>
-
-          <div className={`${styles.panelBody} ${styles.compact}`}>
-            {loading ? (
-              <div className={styles.hint}>Cargando…</div>
-            ) : err ? (
-              <div className={styles.hint} style={{ color: "var(--bad)" }}>
-                {err}
+            {intro?.length ? (
+              <div className={styles.metaIntro}>
+                {intro.map((p, i) => (
+                  <div key={i} className={styles.metaP}>
+                    {p}
+                  </div>
+                ))}
               </div>
             ) : (
-              <ul className={styles.tree}>
-                {roots.map((n) => (
-                  <TreeNode
-                    key={n.id}
-                    node={n}
-                    byParent={byParent}
-                    selectedId={selectedId}
-                    onSelect={setSelectedId}
-                  />
-                ))}
-              </ul>
+              <div className={styles.hint}>
+                No hay texto de introducción definido en el JSON.
+              </div>
             )}
-          </div>
-        </section>
 
-        {/* CENTER: Meta + Table */}
-        <section className={styles.panel} aria-label="Tabla">
-          <div className={styles.panelHeaderRow}>
-            <span>Checklist v2</span>
-            <button
-              className={`${styles.btn} ${styles.tiny}`}
-              onClick={() => setColsOpen(true)}
-              type="button"
-            >
-              Columnas
-            </button>
-          </div>
-
-          {/* Meta toggle + card (dinámico) */}
-          <div className={styles.metaWrap}>
-            <div className={styles.metaTogglebar}>
-              <div className={styles.metaLeft}>
-                <button
-                  className={styles.bullet}
-                  onClick={toggleMeta}
-                  type="button"
-                  title="Ocultar/mostrar"
-                >
-                  •
-                </button>
-                <div>
-                  <div className={styles.metaTitle}>Preguntas iniciales</div>
-                  <div className={styles.subtitle} style={{ margin: 0 }}>
-                    Oculta esto para ver solo estructura
-                  </div>
-                </div>
-              </div>
-              <span className={styles.pill}>
-                {ui?.showMeta ? "Visible" : "Oculto"}
-              </span>
+            <div className={styles.sectionTitle} style={{ marginTop: 24 }}>
+              Preguntas para el usuario
             </div>
-
-            {ui?.showMeta ? (
-              <div className={styles.metaCard}>
-                {intro?.length ? (
-                  <div className={styles.metaIntro}>
-                    {intro.map((p, i) => (
-                      <div key={i} className={styles.metaP}>
-                        {p}
+            <div className={styles.metaGrid}>
+              {metaKeys.length === 0 ? (
+                <div className={styles.hint}>No hay metadatos en el JSON.</div>
+              ) : (
+                metaKeys.map((k) => (
+                  <label key={k} className={styles.field}>
+                    <div className={styles.label}>{labelize(k)}</div>
+                    <input
+                      className={styles.cellInput}
+                      value={meta?.[k] ?? ""}
+                      onChange={(e) => updateMeta(k, e.target.value)}
+                    />
+                    {questions?.[`${k}_help`] ? (
+                      <div className={styles.hint}>
+                        {questions[`${k}_help`]}
                       </div>
-                    ))}
-                  </div>
-                ) : null}
+                    ) : null}
+                  </label>
+                ))
+              )}
+            </div>
+          </section>
+        </main>
+      )}
 
-                <div className={styles.metaGrid}>
-                  {metaKeys.length === 0 ? (
-                    <div className={styles.hint}>
-                      No hay metadatos en el JSON.
-                    </div>
-                  ) : (
-                    metaKeys.map((k) => (
-                      <label key={k} className={styles.field}>
-                        <div className={styles.label}>{labelize(k)}</div>
-                        <input
-                          className={styles.cellInput}
-                          value={meta?.[k] ?? ""}
-                          onChange={(e) => updateMeta(k, e.target.value)}
-                        />
-                        {questions?.[`${k}_help`] ? (
-                          <div className={styles.hint}>
-                            {questions[`${k}_help`]}
-                          </div>
-                        ) : null}
-                      </label>
-                    ))
-                  )}
-                </div>
-              </div>
-            ) : null}
-          </div>
+      {/* CONFIGURACIÓN VI/VC */}
+      {activeTab === "config" && (
+        <main className={styles.configLayout}>
+          <section className={styles.panelWide}>
+            <h2 className={styles.sectionTitle}>Escalas VI</h2>
+            <p className={styles.hint}>
+              Edita las opciones de importancia (VI). Puedes añadir opciones
+              como “Aplica mucho” con valor 4, cambiar textos o eliminar filas.
+            </p>
 
-          {/* Table toolbar */}
-          <div className={styles.tableToolbar}>
-            <input
-              className={styles.search}
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Buscar por código, enunciado o tipo…"
-            />
-            <button
-              className={styles.btn}
-              onClick={() => addNode(TYPES.ITEM)}
-              type="button"
-            >
-              + Fila
-            </button>
-            <button
-              className={styles.btn}
-              onClick={duplicateSelected}
-              type="button"
-              disabled={!selectedId}
-            >
-              Duplicar
-            </button>
-            <button
-              className={`${styles.btn} ${styles.danger}`}
-              onClick={() => selectedId && requestDelete(selectedId)}
-              type="button"
-              disabled={!selectedId}
-            >
-              Eliminar fila
-            </button>
-          </div>
-
-          {/* Table */}
-          <div className={styles.tableWrap}>
-            <table className={styles.table}>
+            <table className={styles.scaleTable}>
               <thead>
                 <tr>
-                  {headerBase.map((h) => (
-                    <th
-                      key={h.key}
-                      style={h.width ? { width: h.width } : undefined}
-                    >
-                      {h.label}
-                    </th>
-                  ))}
-
-                  {columns.map((c) => (
-                    <th key={c.id} style={{ width: 160 }}>
-                      {c.type === "formula" ? `ƒ ${c.label}` : c.label}
-                    </th>
-                  ))}
-
-                  <th style={{ width: 170 }}>Acciones</th>
+                  <th>Etiqueta visible</th>
+                  <th>Valor numérico</th>
+                  <th />
                 </tr>
               </thead>
-
               <tbody>
-                {filteredRows.map((n) => {
-                  const isSel = n.id === selectedId;
-                  const parent = n.parentId
-                    ? nodesById.get(String(n.parentId))
-                    : null;
-
-                  return (
-                    <tr
-                      key={n.id}
-                      className={isSel ? styles.rowSelected : ""}
-                      onClick={() => setSelected(n.id)}
-                    >
-                      {/* CODE */}
-                      <td>
-                        {isSel ? (
-                          <input
-                            className={styles.cellInput}
-                            value={n.code || ""}
-                            placeholder="Código"
-                            onChange={(e) =>
-                              updateNode(
-                                n.id,
-                                { code: e.target.value },
-                                undefined
-                              )
-                            }
-                            onClick={(e) => e.stopPropagation()}
-                          />
-                        ) : (
-                          <div className={styles.cellText}>{n.code || "—"}</div>
-                        )}
-                      </td>
-
-                      {/* TITLE */}
-                      <td>
-                        {isSel ? (
-                          <input
-                            className={styles.cellInput}
-                            value={n.title || ""}
-                            placeholder="Enunciado"
-                            onChange={(e) =>
-                              updateNode(
-                                n.id,
-                                { title: e.target.value },
-                                undefined
-                              )
-                            }
-                            onClick={(e) => e.stopPropagation()}
-                          />
-                        ) : (
-                          <div
-                            className={`${styles.cellText} ${styles.cellTextMultiline}`}
-                          >
-                            {n.title || "—"}
-                          </div>
-                        )}
-                      </td>
-
-                      {/* TYPE */}
-                      <td>
-                        {isSel ? (
-                          <select
-                            className={styles.cellSelect}
-                            value={n.type}
-                            onChange={(e) =>
-                              updateNode(
-                                n.id,
-                                { type: e.target.value },
-                                "Tipo actualizado."
-                              )
-                            }
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <option value={TYPES.GROUP}>GROUP</option>
-                            <option value={TYPES.ITEM}>ITEM</option>
-                          </select>
-                        ) : (
-                          <div className={styles.cellText}>{n.type}</div>
-                        )}
-                      </td>
-
-                      {/* PARENT */}
-                      <td>
-                        {isSel ? (
-                          <select
-                            className={styles.cellSelect}
-                            value={n.parentId || ""}
-                            onChange={(e) =>
-                              setParent(n.id, e.target.value || null)
-                            }
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <option value="">— (sin padre)</option>
-                            {allowedParents
-                              .filter((p) => p.id !== n.id)
-                              .map((p) => (
-                                <option key={p.id} value={p.id}>
-                                  {p.type}: {nodeLabel(p)}
-                                </option>
-                              ))}
-                          </select>
-                        ) : (
-                          <div className={styles.cellText}>
-                            {parent
-                              ? `${parent.type}: ${nodeLabel(parent)}`
-                              : "—"}
-                          </div>
-                        )}
-                      </td>
-
-                      {/* VI/VC readonly */}
-                      <td>
-                        <div className={styles.mutedCell}>
-                          {viLabel(scales, n.viKey) || "—"}
-                        </div>
-                      </td>
-                      <td>
-                        <div className={styles.mutedCell}>
-                          {String(viValue(scales, n.viKey) ?? "") || "—"}
-                        </div>
-                      </td>
-                      <td>
-                        <div className={styles.mutedCell}>
-                          {vcLabel(scales, n.vcKey) || "—"}
-                        </div>
-                      </td>
-                      <td>
-                        <div className={styles.mutedCell}>
-                          {String(vcValue(scales, n.vcKey) ?? "") || "—"}
-                        </div>
-                      </td>
-
-                      {/* PESO */}
-                      <td>
-                        {isSel ? (
-                          <input
-                            className={`${styles.cellInput} ${styles.mini}`}
-                            type="number"
-                            step="0.1"
-                            value={String(n.weight ?? 1)}
-                            onChange={(e) =>
-                              updateNode(
-                                n.id,
-                                { weight: Number(e.target.value || 0) },
-                                undefined
-                              )
-                            }
-                            onClick={(e) => e.stopPropagation()}
-                          />
-                        ) : (
-                          <div className={styles.cellText}>
-                            {String(n.weight ?? 1)}
-                          </div>
-                        )}
-                      </td>
-
-                      {/* REQ */}
-                      <td>
-                        {isSel ? (
-                          <select
-                            className={`${styles.cellSelect} ${styles.mini}`}
-                            value={String(!!n.required)}
-                            onChange={(e) =>
-                              updateNode(
-                                n.id,
-                                { required: e.target.value === "true" },
-                                undefined
-                              )
-                            }
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <option value="true">Sí</option>
-                            <option value="false">No</option>
-                          </select>
-                        ) : (
-                          <div className={styles.cellText}>
-                            {n.required ? "Sí" : "No"}
-                          </div>
-                        )}
-                      </td>
-
-                      {/* ACTIVO */}
-                      <td>
-                        {isSel ? (
-                          <select
-                            className={`${styles.cellSelect} ${styles.mini}`}
-                            value={String(!!n.active)}
-                            onChange={(e) =>
-                              updateNode(
-                                n.id,
-                                { active: e.target.value === "true" },
-                                undefined
-                              )
-                            }
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <option value="true">Sí</option>
-                            <option value="false">No</option>
-                          </select>
-                        ) : (
-                          <div className={styles.cellText}>
-                            {n.active === false ? "No" : "Sí"}
-                          </div>
-                        )}
-                      </td>
-
-                      {/* CUSTOM COLUMNS */}
-                      {columns.map((c) => {
-                        if (!isApplicable(c, n)) {
-                          return (
-                            <td key={c.id}>
-                              <div className={styles.mutedCell}>—</div>
-                            </td>
-                          );
+                {(scales?.VI || []).map((s, idx) => (
+                  <tr key={s.key || idx}>
+                    <td>
+                      <input
+                        className={styles.cellInput}
+                        value={s.label || ""}
+                        onChange={(e) =>
+                          updateScale("VI", idx, "label", e.target.value)
                         }
-
-                        if (c.type === "formula") {
-                          return (
-                            <td key={c.id}>
-                              <div className={styles.formulaChip}>
-                                ƒ <b>{c.key}</b>{" "}
-                                <span>{c.formula || "(sin fórmula)"}</span>
-                              </div>
-                            </td>
-                          );
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className={`${styles.cellInput} ${styles.mini}`}
+                        type="number"
+                        step="1"
+                        value={String(s.value ?? "")}
+                        onChange={(e) =>
+                          updateScale("VI", idx, "value", e.target.value)
                         }
-
-                        const val = n.custom?.[c.key];
-                        const isEditableCell = isSel && c.editable !== false;
-                        if (!isEditableCell) {
-                          const display = (() => {
-                            if (val === null || val === undefined || val === "")
-                              return "—";
-                            if (c.type === "boolean") {
-                              const b = val === true || val === "true";
-                              return b ? "Sí" : "No";
-                            }
-                            return String(val);
-                          })();
-                          return (
-                            <td key={c.id}>
-                              <div className={styles.cellText}>{display}</div>
-                            </td>
-                          );
-                        }
-
-                        if (c.type === "select") {
-                          return (
-                            <td key={c.id}>
-                              <select
-                                className={styles.cellSelect}
-                                value={val ?? ""}
-                                onChange={(e) =>
-                                  setCustomValue(n.id, c.key, e.target.value)
-                                }
-                                onClick={(e) => e.stopPropagation()}
-                                disabled={c.editable === false}
-                              >
-                                <option value="">—</option>
-                                {(c.options || []).map((opt) => (
-                                  <option key={String(opt)} value={String(opt)}>
-                                    {String(opt)}
-                                  </option>
-                                ))}
-                              </select>
-                            </td>
-                          );
-                        }
-
-                        if (c.type === "boolean") {
-                          return (
-                            <td key={c.id}>
-                              <select
-                                className={`${styles.cellSelect} ${styles.mini}`}
-                                value={String(!!val)}
-                                onChange={(e) =>
-                                  setCustomValue(
-                                    n.id,
-                                    c.key,
-                                    e.target.value === "true"
-                                  )
-                                }
-                                onClick={(e) => e.stopPropagation()}
-                                disabled={c.editable === false}
-                              >
-                                <option value="true">Sí</option>
-                                <option value="false">No</option>
-                              </select>
-                            </td>
-                          );
-                        }
-
-                        return (
-                          <td key={c.id}>
-                            <input
-                              className={styles.cellInput}
-                              value={val ?? ""}
-                              type={c.type === "number" ? "number" : "text"}
-                              step={c.type === "number" ? "0.1" : undefined}
-                              onChange={(e) => {
-                                const raw = e.target.value;
-                                const v =
-                                  c.type === "number"
-                                    ? raw === ""
-                                      ? ""
-                                      : Number(raw)
-                                    : raw;
-                                setCustomValue(n.id, c.key, v);
-                              }}
-                              onClick={(e) => e.stopPropagation()}
-                              disabled={c.editable === false}
-                            />
-                          </td>
-                        );
-                      })}
-
-                      {/* ACTIONS */}
-                      <td
-                        className={styles.actionsCol}
-                        onClick={(e) => e.stopPropagation()}
+                      />
+                    </td>
+                    <td className={styles.actionsCol}>
+                      <button
+                        type="button"
+                        className={`${styles.iconbtn} ${styles.iconDanger}`}
+                        onClick={() => removeScaleRow("VI", idx)}
+                        title="Eliminar opción"
                       >
-                        <button
-                          className={styles.iconbtn}
-                          title="Subir (entre hermanos)"
-                          onClick={() => moveWithinSiblings(n.id, -1)}
-                          type="button"
-                        >
-                          ↑
-                        </button>
-                        <button
-                          className={styles.iconbtn}
-                          title="Bajar (entre hermanos)"
-                          onClick={() => moveWithinSiblings(n.id, +1)}
-                          type="button"
-                        >
-                          ↓
-                        </button>
-                        <button
-                          className={`${styles.iconbtn} ${styles.iconDanger}`}
-                          title="Eliminar"
-                          onClick={() => requestDelete(n.id)}
-                          type="button"
-                        >
-                          🗑
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-
-                {filteredRows.length === 0 ? (
+                        🗑
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {(!scales?.VI || scales.VI.length === 0) && (
                   <tr>
-                    <td colSpan={headerBase.length + columns.length + 1}>
-                      <div className={styles.hint} style={{ padding: 12 }}>
-                        Sin resultados.
+                    <td colSpan={3}>
+                      <div className={styles.hint}>
+                        No hay opciones definidas para VI.
                       </div>
                     </td>
                   </tr>
-                ) : null}
+                )}
               </tbody>
             </table>
-          </div>
-        </section>
 
-        {/* RIGHT: Inspector */}
-        <section className={styles.panel} aria-label="Inspector">
-          <div className={styles.panelHeader}>Inspector</div>
+            <button
+              type="button"
+              className={`${styles.btn} ${styles.primary}`}
+              onClick={() => addScaleRow("VI")}
+              style={{ marginTop: 8 }}
+            >
+              + Añadir opción VI
+            </button>
+          </section>
 
-          <div className={styles.panelBody}>
-            <div className={styles.hint}>
-              Selecciona un nodo del árbol o una fila de la tabla para
-              ver/editar detalles.
+          <section className={styles.panelWide}>
+            <h2 className={styles.sectionTitle}>Escalas VC</h2>
+            <p className={styles.hint}>
+              Edita las opciones de aplicación (VC). Ejemplo: “Aplica mucho” con
+              valor 4.
+            </p>
+
+            <table className={styles.scaleTable}>
+              <thead>
+                <tr>
+                  <th>Etiqueta visible</th>
+                  <th>Valor numérico</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {(scales?.VC || []).map((s, idx) => (
+                  <tr key={s.key || idx}>
+                    <td>
+                      <input
+                        className={styles.cellInput}
+                        value={s.label || ""}
+                        onChange={(e) =>
+                          updateScale("VC", idx, "label", e.target.value)
+                        }
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className={`${styles.cellInput} ${styles.mini}`}
+                        type="number"
+                        step="1"
+                        value={String(s.value ?? "")}
+                        onChange={(e) =>
+                          updateScale("VC", idx, "value", e.target.value)
+                        }
+                      />
+                    </td>
+                    <td className={styles.actionsCol}>
+                      <button
+                        type="button"
+                        className={`${styles.iconbtn} ${styles.iconDanger}`}
+                        onClick={() => removeScaleRow("VC", idx)}
+                        title="Eliminar opción"
+                      >
+                        🗑
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {(!scales?.VC || scales.VC.length === 0) && (
+                  <tr>
+                    <td colSpan={3}>
+                      <div className={styles.hint}>
+                        No hay opciones definidas para VC.
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+
+            <button
+              type="button"
+              className={`${styles.btn} ${styles.primary}`}
+              onClick={() => addScaleRow("VC")}
+              style={{ marginTop: 8 }}
+            >
+              + Añadir opción VC
+            </button>
+          </section>
+        </main>
+      )}
+
+      {/* PLANTILLA */}
+      {activeTab === "template" && (
+        <main className={styles.layout}>
+          {/* LEFT: Tree */}
+          <section className={styles.panel} aria-label="Árbol">
+            <div className={styles.panelHeader}>Estructura</div>
+
+            <div className={styles.treeActions}>
+              <button
+                className={styles.btn}
+                onClick={() => addNode(TYPES.GROUP)}
+                type="button"
+              >
+                + Agrupación
+              </button>
+              <button
+                className={styles.btn}
+                onClick={() => addNode(TYPES.ITEM)}
+                type="button"
+              >
+                + Ítem
+              </button>
+              <button
+                className={`${styles.btn} ${styles.danger}`}
+                onClick={() => selectedId && requestDelete(selectedId)}
+                type="button"
+                disabled={!selectedId}
+              >
+                Eliminar
+              </button>
             </div>
 
-            <div className={styles.hr} />
+            <div className={`${styles.panelBody} ${styles.compact}`}>
+              {loading ? (
+                <div className={styles.hint}>Cargando…</div>
+              ) : err ? (
+                <div className={styles.hint} style={{ color: "var(--bad)" }}>
+                  {err}
+                </div>
+              ) : (
+                <ul className={styles.tree}>
+                  {roots.map((n) => (
+                    <TreeNode
+                      key={n.id}
+                      node={n}
+                      byParent={byParent}
+                      selectedId={selectedId}
+                      onSelect={setSelectedId}
+                    />
+                  ))}
+                </ul>
+              )}
+            </div>
+          </section>
 
-            {!selectedNode || !draft ? (
-              <div className={styles.hint}>No hay selección.</div>
-            ) : (
-              <>
-                <div className={styles.row2}>
+          {/* RIGHT: Inspector */}
+          <section className={styles.panel} aria-label="Inspector">
+            <div className={styles.panelHeader}>Inspector</div>
+
+            <div className={styles.panelBody}>
+              <div className={styles.hint}>
+                Selecciona un nodo del árbol para ver/editar detalles.
+              </div>
+
+              <div className={styles.hr} />
+
+              {!selectedNode || !draft ? (
+                <div className={styles.hint}>No hay selección.</div>
+              ) : (
+                <>
+                  <div className={styles.row2}>
+                    <div className={styles.field}>
+                      <div className={styles.label}>ID</div>
+                      <input
+                        className={styles.cellInput}
+                        value={draft.id}
+                        disabled
+                      />
+                    </div>
+                    <div className={styles.field}>
+                      <div className={styles.label}>Tipo</div>
+                      <select
+                        className={styles.cellSelect}
+                        value={draft.type}
+                        onChange={(e) =>
+                          setDraft((p) => ({ ...p, type: e.target.value }))
+                        }
+                      >
+                        <option value={TYPES.LEVEL}>LEVEL</option>
+                        <option value={TYPES.GROUP}>GROUP</option>
+                        <option value={TYPES.ITEM}>ITEM</option>
+                      </select>
+                    </div>
+                  </div>
+
                   <div className={styles.field}>
-                    <div className={styles.label}>ID</div>
+                    <div className={styles.label}>Código</div>
                     <input
                       className={styles.cellInput}
-                      value={draft.id}
-                      disabled
+                      value={draft.code}
+                      onChange={(e) =>
+                        setDraft((p) => ({ ...p, code: e.target.value }))
+                      }
+                      placeholder="Ej: UX-01"
                     />
                   </div>
-                  <div className={styles.field}>
-                    <div className={styles.label}>Tipo</div>
-                    <select
-                      className={styles.cellSelect}
-                      value={draft.type}
-                      onChange={(e) =>
-                        setDraft((p) => ({ ...p, type: e.target.value }))
-                      }
-                    >
-                      <option value={TYPES.LEVEL}>LEVEL</option>
-                      <option value={TYPES.GROUP}>GROUP</option>
-                      <option value={TYPES.ITEM}>ITEM</option>
-                    </select>
-                  </div>
-                </div>
 
-                <div className={styles.field}>
-                  <div className={styles.label}>Código</div>
-                  <input
-                    className={styles.cellInput}
-                    value={draft.code}
-                    onChange={(e) =>
-                      setDraft((p) => ({ ...p, code: e.target.value }))
-                    }
-                    placeholder="Ej: UX-01"
-                  />
-                </div>
-
-                <div className={styles.field}>
-                  <div className={styles.label}>Enunciado / Nombre</div>
-                  <input
-                    className={styles.cellInput}
-                    value={draft.title}
-                    onChange={(e) =>
-                      setDraft((p) => ({ ...p, title: e.target.value }))
-                    }
-                    placeholder="Texto visible del criterio o agrupación"
-                  />
-                </div>
-
-                <div className={styles.row2}>
                   <div className={styles.field}>
-                    <div className={styles.label}>Escala VI</div>
-                    <select
-                      className={styles.cellSelect}
-                      value={draft.viKey}
-                      onChange={(e) =>
-                        setDraft((p) => ({ ...p, viKey: e.target.value }))
-                      }
-                    >
-                      {(scales?.VI || DEFAULT_SCALES.VI).map((s) => (
-                        <option key={s.key} value={s.key}>
-                          {s.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className={styles.field}>
-                    <div className={styles.label}>Escala VC</div>
-                    <select
-                      className={styles.cellSelect}
-                      value={draft.vcKey}
-                      onChange={(e) =>
-                        setDraft((p) => ({ ...p, vcKey: e.target.value }))
-                      }
-                    >
-                      {(scales?.VC || DEFAULT_SCALES.VC).map((s) => (
-                        <option key={s.key} value={s.key}>
-                          {s.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                <div className={styles.row2}>
-                  <div className={styles.field}>
-                    <div className={styles.label}>Peso</div>
+                    <div className={styles.label}>Enunciado / Nombre</div>
                     <input
                       className={styles.cellInput}
-                      type="number"
-                      step="0.1"
-                      value={String(draft.weight ?? 1)}
+                      value={draft.title}
                       onChange={(e) =>
-                        setDraft((p) => ({ ...p, weight: e.target.value }))
+                        setDraft((p) => ({ ...p, title: e.target.value }))
                       }
+                      placeholder="Texto visible del criterio o agrupación"
                     />
                   </div>
-                  <div className={styles.field}>
-                    <div className={styles.label}>Padre</div>
-                    <select
-                      className={styles.cellSelect}
-                      value={draft.parentId}
-                      onChange={(e) =>
-                        setDraft((p) => ({ ...p, parentId: e.target.value }))
-                      }
-                    >
-                      <option value="">— (sin padre)</option>
-                      {allowedParents
-                        .filter((p) => p.id !== selectedNode.id)
-                        .map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.type}: {nodeLabel(p)}
+
+                  <div className={styles.row2}>
+                    <div className={styles.field}>
+                      <div className={styles.label}>Escala VI</div>
+                      <select
+                        className={styles.cellSelect}
+                        value={draft.viKey}
+                        onChange={(e) =>
+                          setDraft((p) => ({ ...p, viKey: e.target.value }))
+                        }
+                      >
+                        {(scales?.VI || DEFAULT_SCALES.VI).map((s) => (
+                          <option key={s.key} value={s.key}>
+                            {s.label}
                           </option>
                         ))}
-                    </select>
-                  </div>
-                </div>
-
-                <div className={styles.row2}>
-                  <div className={styles.field}>
-                    <div className={styles.label}>Requerido</div>
-                    <select
-                      className={styles.cellSelect}
-                      value={draft.required}
-                      onChange={(e) =>
-                        setDraft((p) => ({ ...p, required: e.target.value }))
-                      }
-                    >
-                      <option value="true">Sí</option>
-                      <option value="false">No</option>
-                    </select>
-                  </div>
-                  <div className={styles.field}>
-                    <div className={styles.label}>Activo</div>
-                    <select
-                      className={styles.cellSelect}
-                      value={draft.active}
-                      onChange={(e) =>
-                        setDraft((p) => ({ ...p, active: e.target.value }))
-                      }
-                    >
-                      <option value="true">Sí</option>
-                      <option value="false">No</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className={styles.field}>
-                  <div className={styles.label}>Descripción / Ayuda</div>
-                  <textarea
-                    className={styles.cellInput}
-                    value={draft.desc}
-                    onChange={(e) =>
-                      setDraft((p) => ({ ...p, desc: e.target.value }))
-                    }
-                    placeholder="Texto largo, ejemplos, guía para el evaluador…"
-                  />
-                </div>
-
-                <div className={styles.inlineActions}>
-                  <button
-                    className={`${styles.btn} ${styles.primary}`}
-                    onClick={applyInspector}
-                    type="button"
-                  >
-                    Aplicar cambios
-                  </button>
-                  <button
-                    className={styles.btn}
-                    onClick={revertInspector}
-                    type="button"
-                  >
-                    Revertir
-                  </button>
-                </div>
-
-                <div className={styles.sectionTitle}>Campos adicionales</div>
-
-                <div>
-                  {columns.length === 0 ? (
-                    <div className={styles.hint}>
-                      No hay columnas personalizadas todavía.
+                      </select>
                     </div>
-                  ) : (
-                    <>
-                      {columns
-                        .filter((c) => isApplicable(c, selectedNode))
-                        .map((c) => {
-                          if (c.type === "formula") {
-                            return (
-                              <div key={c.id} className={styles.field}>
-                                <div className={styles.label}>
-                                  {c.label} (formula)
-                                </div>
-                                <div className={styles.formulaChip}>
-                                  ƒ <b>{c.key}</b>{" "}
-                                  <span>{c.formula || "(sin fórmula)"}</span>
-                                </div>
-                              </div>
-                            );
-                          }
+                    <div className={styles.field}>
+                      <div className={styles.label}>Escala VC</div>
+                      <select
+                        className={styles.cellSelect}
+                        value={draft.vcKey}
+                        onChange={(e) =>
+                          setDraft((p) => ({ ...p, vcKey: e.target.value }))
+                        }
+                      >
+                        {(scales?.VC || DEFAULT_SCALES.VC).map((s) => (
+                          <option key={s.key} value={s.key}>
+                            {s.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
 
-                          const val = selectedNode.custom?.[c.key];
+                  <div className={styles.row2}>
+                    <div className={styles.field}>
+                      <div className={styles.label}>Peso</div>
+                      <input
+                        className={styles.cellInput}
+                        type="number"
+                        step="0.1"
+                        value={String(draft.weight ?? 1)}
+                        onChange={(e) =>
+                          setDraft((p) => ({ ...p, weight: e.target.value }))
+                        }
+                      />
+                    </div>
+                    <div className={styles.field}>
+                      <div className={styles.label}>Padre</div>
+                      <select
+                        className={styles.cellSelect}
+                        value={draft.parentId}
+                        onChange={(e) =>
+                          setDraft((p) => ({ ...p, parentId: e.target.value }))
+                        }
+                      >
+                        <option value="">— (sin padre)</option>
+                        {allowedParents
+                          .filter((p) => p.id !== selectedNode.id)
+                          .map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.type}: {nodeLabel(p)}
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                  </div>
 
-                          if (c.type === "select") {
-                            return (
-                              <div key={c.id} className={styles.field}>
-                                <div className={styles.label}>
-                                  {c.label} (select)
-                                </div>
-                                <select
-                                  className={styles.cellSelect}
-                                  value={val ?? ""}
-                                  onChange={(e) =>
-                                    setCustomValue(
-                                      selectedNode.id,
-                                      c.key,
-                                      e.target.value
-                                    )
-                                  }
-                                  disabled={c.editable === false}
-                                >
-                                  <option value="">—</option>
-                                  {(c.options || []).map((opt) => (
-                                    <option
-                                      key={String(opt)}
-                                      value={String(opt)}
-                                    >
-                                      {String(opt)}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                            );
-                          }
+                  <div className={styles.row2}>
+                    <div className={styles.field}>
+                      <div className={styles.label}>Requerido</div>
+                      <select
+                        className={styles.cellSelect}
+                        value={draft.required}
+                        onChange={(e) =>
+                          setDraft((p) => ({ ...p, required: e.target.value }))
+                        }
+                      >
+                        <option value="true">Sí</option>
+                        <option value="false">No</option>
+                      </select>
+                    </div>
+                    <div className={styles.field}>
+                      <div className={styles.label}>Activo</div>
+                      <select
+                        className={styles.cellSelect}
+                        value={draft.active}
+                        onChange={(e) =>
+                          setDraft((p) => ({ ...p, active: e.target.value }))
+                        }
+                      >
+                        <option value="true">Sí</option>
+                        <option value="false">No</option>
+                      </select>
+                    </div>
+                  </div>
 
-                          if (c.type === "boolean") {
-                            return (
-                              <div key={c.id} className={styles.field}>
-                                <div className={styles.label}>
-                                  {c.label} (boolean)
-                                </div>
-                                <select
-                                  className={`${styles.cellSelect} ${styles.mini}`}
-                                  value={String(!!val)}
-                                  onChange={(e) =>
-                                    setCustomValue(
-                                      selectedNode.id,
-                                      c.key,
-                                      e.target.value === "true"
-                                    )
-                                  }
-                                  disabled={c.editable === false}
-                                >
-                                  <option value="true">Sí</option>
-                                  <option value="false">No</option>
-                                </select>
-                              </div>
-                            );
-                          }
+                  <div className={styles.field}>
+                    <div className={styles.label}>Observaciones</div>
+                    <textarea
+                      className={styles.cellInput}
+                      value={draft.observaciones || ""}
+                      onChange={(e) =>
+                        setDraft((p) => ({
+                          ...p,
+                          observaciones: e.target.value,
+                        }))
+                      }
+                      placeholder="Notas, comentarios, contexto adicional…"
+                    />
+                  </div>
 
-                          return (
-                            <div key={c.id} className={styles.field}>
-                              <div className={styles.label}>
-                                {c.label} ({c.type})
-                              </div>
-                              <input
-                                className={styles.cellInput}
-                                value={val ?? ""}
-                                type={c.type === "number" ? "number" : "text"}
-                                step={c.type === "number" ? "0.1" : undefined}
-                                onChange={(e) => {
-                                  const raw = e.target.value;
-                                  const v =
-                                    c.type === "number"
-                                      ? raw === ""
-                                        ? ""
-                                        : Number(raw)
-                                      : raw;
-                                  setCustomValue(selectedNode.id, c.key, v);
-                                }}
-                                disabled={c.editable === false}
-                              />
-                            </div>
-                          );
-                        })}
+                  <div className={styles.field}>
+                    <div className={styles.label}>Descripción / Ayuda</div>
+                    <textarea
+                      className={styles.cellInput}
+                      value={draft.desc}
+                      onChange={(e) =>
+                        setDraft((p) => ({ ...p, desc: e.target.value }))
+                      }
+                      placeholder="Texto largo, ejemplos, guía para el evaluador…"
+                    />
+                  </div>
 
-                      {columns.filter((c) => isApplicable(c, selectedNode))
-                        .length === 0 ? (
-                        <div className={styles.hint}>
-                          No hay columnas aplicables para este tipo de nodo.
-                        </div>
-                      ) : null}
-                    </>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-
-          <div className={styles.log}>
-            <div
-              className={`${styles.badge} ${
-                statusKind ? styles[`badge_${statusKind}`] : ""
-              }`}
-            >
-              {statusKind === "ok"
-                ? "OK"
-                : statusKind === "warn"
-                ? "Atención"
-                : statusKind === "bad"
-                ? "Error"
-                : "Listo"}
+                  <div className={styles.inlineActions}>
+                    <button
+                      className={`${styles.btn} ${styles.primary}`}
+                      onClick={applyInspector}
+                      type="button"
+                    >
+                      Aplicar cambios
+                    </button>
+                    <button
+                      className={styles.btn}
+                      onClick={revertInspector}
+                      type="button"
+                    >
+                      Revertir
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
-            <div className={styles.logLine}>{statusMsg}</div>
-          </div>
-        </section>
-      </main>
 
-      <ColumnsModal
-        open={colsOpen}
-        onClose={() => setColsOpen(false)}
-        columns={columns}
-        setColumns={setColumns}
-        nodes={nodes}
-        setNodes={setNodes}
-        setDirty={setDirty}
-        setStatus={setStatus}
-      />
+            <div className={styles.log}>
+              <div
+                className={`${styles.badge} ${
+                  statusKind ? styles[`badge_${statusKind}`] : ""
+                }`}
+              >
+                {statusKind === "ok"
+                  ? "OK"
+                  : statusKind === "warn"
+                  ? "Atención"
+                  : statusKind === "bad"
+                  ? "Error"
+                  : "Listo"}
+              </div>
+              <div className={styles.logLine}>{statusMsg}</div>
+            </div>
+          </section>
+        </main>
+      )}
 
       <ConfirmModal
         open={confirm.open}
