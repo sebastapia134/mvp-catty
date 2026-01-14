@@ -792,17 +792,23 @@ function computeLevelsForExport(nodes, scales) {
   function ensureLevels(node) {
     if (result.has(node.id)) return result.get(node.id);
 
+    // ÍTEM: directo desde escalas
     if (node.type === TYPES.ITEM) {
       const vi = viCache.get(node.viKey) ?? viValue(scales, node.viKey);
       const vc = vcCache.get(node.vcKey) ?? vcValue(scales, node.vcKey);
+
+      const viNum = Number(vi);
+      const vcNum = Number(vc);
+
       const levels = {
-        nivel_aplicacion: Number.isFinite(vc) ? vc : null,
-        nivel_importancia: Number.isFinite(vi) ? vi : null,
+        nivel_aplicacion: Number.isFinite(vcNum) ? vcNum : null,
+        nivel_importancia: Number.isFinite(viNum) ? viNum : null,
       };
       result.set(node.id, levels);
       return levels;
     }
 
+    // Agrupaciones / LEVEL: agregan según sus ÍTEMS hijos (directos o descendientes)
     const children = byParent.get(String(node.id)) || [];
     const childItems = children.filter((c) => c.type === TYPES.ITEM);
 
@@ -826,6 +832,7 @@ function computeLevelsForExport(nodes, scales) {
     }
 
     if (!childItems.length) {
+      // sin ÍTEMS directos, miramos descendientes
       gatherItemLevels(node);
     }
 
@@ -836,10 +843,10 @@ function computeLevelsForExport(nodes, scales) {
     }
 
     const aplicValues = allItemLevels
-      .map((l) => l.nivel_aplicacion)
+      .map((l) => Number(l.nivel_aplicacion))
       .filter((v) => Number.isFinite(v));
     const impValues = allItemLevels
-      .map((l) => l.nivel_importancia)
+      .map((l) => Number(l.nivel_importancia))
       .filter((v) => Number.isFinite(v));
 
     const nivel_aplicacion =
@@ -854,7 +861,7 @@ function computeLevelsForExport(nodes, scales) {
 
   for (const n of nodes) ensureLevels(n);
 
-  return result;
+  return result; // Map id -> {nivel_aplicacion, nivel_importancia}
 }
 
 function editedToOriginal(edited, options = {}) {
@@ -893,6 +900,11 @@ function editedToOriginal(edited, options = {}) {
     const nivel_aplicacion = levelInfo.nivel_aplicacion ?? null;
     const nivel_importancia = levelInfo.nivel_importancia ?? null;
 
+    // restaurar relación padre (sin exponerla como columna en Excel)
+    const rawParent = n.parentId ?? n.parent ?? null;
+    const parentOut =
+      rawParent == null ? null : toNumericOrNull(rawParent) ?? rawParent;
+
     return {
       id: idOut,
       1: p1,
@@ -907,7 +919,9 @@ function editedToOriginal(edited, options = {}) {
       observaciones: observaciones ?? null,
       nivel_aplicacion,
       nivel_importancia,
-      // parentId, parent, agrupacion_es removidos
+      parentId: parentOut,
+      parent: parentOut,
+      // NO ponemos agrupacion_es para que tampoco aparezca fácilmente en Excel
     };
   });
 
@@ -1702,14 +1716,14 @@ export default function FileDetail() {
     <div className={styles.page}>
       <header className={styles.header}>
         <div className={styles.topbar}>
+          <button
+            className={`${styles.btn} ${styles.tiny}`}
+            onClick={() => navigate(-1)}
+            type="button"
+          >
+            ← Volver
+          </button>
           <div className={styles.brand}>
-            <button
-              className={`${styles.btn} ${styles.tiny}`}
-              onClick={() => navigate(-1)}
-              type="button"
-            >
-              ← Volver
-            </button>
             <div>
               <div className={styles.title}>{derivedName}</div>
             </div>
@@ -2312,8 +2326,6 @@ export default function FileDetail() {
                     </div>
                   </div>
 
-                  <div className={styles.row2}></div>
-
                   <div className={styles.field}>
                     <div className={styles.label}>Observaciones</div>
                     <textarea
@@ -2344,20 +2356,6 @@ export default function FileDetail() {
                   {/* Vista rápida de severidad y prioridad SOLO para ÍTEMS */}
                   {selectedNode.type === TYPES.ITEM && (
                     <>
-                      <div className={styles.field}>
-                        <div className={styles.label}>
-                          Severidad normalizada (0–100)
-                        </div>
-                        <input
-                          className={styles.cellInput}
-                          disabled
-                          value={`${computeSeverityPercent(
-                            scales,
-                            draft.viKey,
-                            draft.vcKey
-                          )} %`}
-                        />
-                      </div>
                       <div className={styles.field}>
                         <div className={styles.label}>
                           Prioridad (según niveles configurados)
