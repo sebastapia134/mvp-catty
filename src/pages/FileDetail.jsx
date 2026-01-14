@@ -603,32 +603,24 @@ function normalizeNodesAny(payload, scales) {
   }
 
   if (nodes.length) {
-    const idSet = new Set(nodes.map((n) => n.id));
+    // Mapa de código normalizado -> id
     const byCode = new Map(
       nodes.filter((n) => n.code).map((n) => [normalizeCode(n.code), n.id])
     );
 
     nodes = nodes.map((n) => {
-      const pid = n.parentId;
-      if (!pid) return n;
-      if (idSet.has(pid)) return n;
-
-      // solo intentar mapear como código cuando parentId NO es un número entero simple
-      const asNumber = Number(pid);
-      const isPlainInt =
-        typeof pid === "number" ||
-        (Number.isInteger(asNumber) && String(asNumber) === String(pid));
-
-      if (isPlainInt) {
-        // es un int que no está en idSet: no lo tocamos, lo dejamos tal cual
-        return n;
+      const rawPidCode = n.parentId; // del JSON, siempre viene como código o null
+      if (!rawPidCode) {
+        return { ...n, parentId: null }; // raíz
       }
 
-      const maybe = byCode.get(normalizeCode(pid));
-      return maybe ? { ...n, parentId: maybe } : n;
+      // convertimos de código del padre -> id interno del padre
+      const parentNodeId = byCode.get(normalizeCode(rawPidCode));
+      return parentNodeId
+        ? { ...n, parentId: parentNodeId }
+        : { ...n, parentId: null }; // si no se encuentra, mejor colgarlo a raíz
     });
   }
-
   return nodes;
 }
 
@@ -893,11 +885,20 @@ function editedToOriginal(edited, options = {}) {
       }))
     : [];
 
+  // 1) mapa id -> código para poder traducir padres internos (ids) a códigos
+  const idToCode = new Map(
+    nodesIn.map((n) => [
+      String(n.id),
+      String(n.code ?? n.codigo ?? "").trim() || null,
+    ])
+  );
+
+  // 2) calcular niveles para exportar (como ya hacías)
   const levelsById = computeLevelsForExport(nodesIn, edited.scales);
 
   const nodesOut = nodesIn.map((n) => {
     const idOut = toNumericOrNull(n.id) ?? n.id;
-    const code = String(n.code ?? n.codigo ?? "").trim();
+    const code = String(n.code ?? n.codigo ?? "").trim() || null;
     const [p1, p2, p3, p4, p5] = parseHierarchyParts(code);
 
     const observaciones =
@@ -911,9 +912,21 @@ function editedToOriginal(edited, options = {}) {
     const nivel_aplicacion = levelInfo.nivel_aplicacion ?? null;
     const nivel_importancia = levelInfo.nivel_importancia ?? null;
 
-    // NO volvemos a “intuir” el parent; usamos exactamente lo que hay en memoria
-    const parentOut =
-      n.parentId === undefined || n.parentId === null ? null : n.parentId;
+    // 3) traducir padre interno (id) -> código del padre para JSON
+    let parentOut = null;
+    const internalParent = n.parentId ?? n.parent ?? null;
+
+    if (internalParent != null && internalParent !== "") {
+      const parentCode = idToCode.get(String(internalParent));
+      // si lo encontramos por id, usamos ese código;
+      // si no, asumimos que ya venía como código y lo dejamos tal cual
+      parentOut =
+        parentCode != null && parentCode !== ""
+          ? parentCode
+          : String(internalParent);
+    } else {
+      parentOut = null; // raíz
+    }
 
     return {
       id: idOut,
@@ -929,7 +942,7 @@ function editedToOriginal(edited, options = {}) {
       observaciones: observaciones ?? null,
       nivel_aplicacion,
       nivel_importancia,
-      parentId: parentOut,
+      parentId: parentOut, // <-- SIEMPRE código del padre
       parent: parentOut,
     };
   });
@@ -2243,7 +2256,6 @@ export default function FileDetail() {
                           setDraft((p) => ({ ...p, type: e.target.value }))
                         }
                       >
-                        <option value={TYPES.LEVEL}>LEVEL</option>
                         <option value={TYPES.GROUP}>GROUP</option>
                         <option value={TYPES.ITEM}>ITEM</option>
                       </select>
