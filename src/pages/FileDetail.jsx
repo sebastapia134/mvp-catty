@@ -760,7 +760,7 @@ function classifyPriority(levels, severityPct) {
   const s = Number(severityPct);
   if (!Number.isFinite(s)) return "";
   const found = levels.find(
-    (lvl) => s >= Number(lvl.min ?? 0) && s < Number(lvl.max ?? 100) // [min, max)
+    (lvl) => s >= Number(lvl.min ?? 0) && s <= Number(lvl.max ?? 100) // [min, max)
   );
   return found?.name || "";
 }
