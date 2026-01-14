@@ -901,9 +901,9 @@ function editedToOriginal(edited, options = {}) {
     const nivel_aplicacion = levelInfo.nivel_aplicacion ?? null;
     const nivel_importancia = levelInfo.nivel_importancia ?? null;
 
-    const rawParent = n.parentId ?? n.parent ?? null;
-    const parentOut =
-      rawParent == null ? null : toNumericOrNull(rawParent) ?? rawParent;
+    // En la UI trabajamos siempre con parentId = id del padre o null.
+    // Lo guardamos tal cual, sin intentar "corregir" numérico vs string.
+    const parentOut = n.parentId == null ? null : n.parentId;
 
     return {
       id: idOut,
