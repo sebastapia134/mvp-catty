@@ -872,7 +872,7 @@ function editedToOriginal(edited, options = {}) {
   const questionsOut = edited.questions || {};
   const uiOut = edited.ui || { showMeta: true };
 
-  const nodes = Array.isArray(edited.nodes) ? edited.nodes : [];
+  const nodesIn = Array.isArray(edited.nodes) ? edited.nodes : [];
   const priorityLevelsOut = Array.isArray(edited.priorityLevels)
     ? edited.priorityLevels.map((p, idx) => ({
         id: p.id || `prio_${idx}`,
@@ -882,9 +882,10 @@ function editedToOriginal(edited, options = {}) {
       }))
     : [];
 
-  const levelsById = computeLevelsForExport(nodes, edited.scales);
+  // 1) calcular niveles para TODOS los nodos (ITEM + agrupaciones)
+  const levelsById = computeLevelsForExport(nodesIn, edited.scales);
 
-  const nodesOut = nodes.map((n) => {
+  const nodesOut = nodesIn.map((n) => {
     const idOut = toNumericOrNull(n.id) ?? n.id;
     const code = String(n.code ?? n.codigo ?? "").trim();
     const [p1, p2, p3, p4, p5] = parseHierarchyParts(code);
@@ -900,7 +901,6 @@ function editedToOriginal(edited, options = {}) {
     const nivel_aplicacion = levelInfo.nivel_aplicacion ?? null;
     const nivel_importancia = levelInfo.nivel_importancia ?? null;
 
-    // restaurar relación padre (sin exponerla como columna en Excel)
     const rawParent = n.parentId ?? n.parent ?? null;
     const parentOut =
       rawParent == null ? null : toNumericOrNull(rawParent) ?? rawParent;
@@ -921,7 +921,6 @@ function editedToOriginal(edited, options = {}) {
       nivel_importancia,
       parentId: parentOut,
       parent: parentOut,
-      // NO ponemos agrupacion_es para que tampoco aparezca fácilmente en Excel
     };
   });
 
