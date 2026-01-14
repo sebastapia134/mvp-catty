@@ -609,10 +609,22 @@ function normalizeNodesAny(payload, scales) {
     );
 
     nodes = nodes.map((n) => {
-      if (!n.parentId) return n;
-      if (idSet.has(n.parentId)) return n;
+      const pid = n.parentId;
+      if (!pid) return n;
+      if (idSet.has(pid)) return n;
 
-      const maybe = byCode.get(normalizeCode(n.parentId));
+      // solo intentar mapear como código cuando parentId NO es un número entero simple
+      const asNumber = Number(pid);
+      const isPlainInt =
+        typeof pid === "number" ||
+        (Number.isInteger(asNumber) && String(asNumber) === String(pid));
+
+      if (isPlainInt) {
+        // es un int que no está en idSet: no lo tocamos, lo dejamos tal cual
+        return n;
+      }
+
+      const maybe = byCode.get(normalizeCode(pid));
       return maybe ? { ...n, parentId: maybe } : n;
     });
   }
@@ -863,7 +875,6 @@ function computeLevelsForExport(nodes, scales) {
 
   return result; // Map id -> {nivel_aplicacion, nivel_importancia}
 }
-
 function editedToOriginal(edited, options = {}) {
   const preserveScales = !!options.preserveScales;
 
@@ -882,7 +893,6 @@ function editedToOriginal(edited, options = {}) {
       }))
     : [];
 
-  // 1) calcular niveles para TODOS los nodos (ITEM + agrupaciones)
   const levelsById = computeLevelsForExport(nodesIn, edited.scales);
 
   const nodesOut = nodesIn.map((n) => {
@@ -901,9 +911,9 @@ function editedToOriginal(edited, options = {}) {
     const nivel_aplicacion = levelInfo.nivel_aplicacion ?? null;
     const nivel_importancia = levelInfo.nivel_importancia ?? null;
 
-    // En la UI trabajamos siempre con parentId = id del padre o null.
-    // Lo guardamos tal cual, sin intentar "corregir" numérico vs string.
-    const parentOut = n.parentId == null ? null : n.parentId;
+    // NO volvemos a “intuir” el parent; usamos exactamente lo que hay en memoria
+    const parentOut =
+      n.parentId === undefined || n.parentId === null ? null : n.parentId;
 
     return {
       id: idOut,
@@ -941,7 +951,6 @@ function editedToOriginal(edited, options = {}) {
 
   return out;
 }
-
 /** Helpers escalas (pestaña Configuración) */
 
 function nextScaleKey(prefix, existing) {
