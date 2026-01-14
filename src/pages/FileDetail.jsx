@@ -32,9 +32,9 @@ const DEFAULT_SCALES = {
 
 // Prioridades por defecto (editables por el usuario en la pestaña Configuración)
 const DEFAULT_PRIORITY_LEVELS = [
-  { id: "low", name: "Baja", min: 0, max: 33 },
-  { id: "medium", name: "Media", min: 33, max: 66 },
-  { id: "high", name: "Alta", min: 66, max: 100 },
+  { id: "low", name: "Baja/Nula", min: 0, max: 33 },
+  { id: "medium", name: "Alta", min: 33, max: 66 },
+  { id: "high", name: "Máxima", min: 66, max: 100 },
 ];
 
 // Convierte a número si es posible; devuelve null si no es numérico.
@@ -1703,16 +1703,18 @@ export default function FileDetail() {
       <header className={styles.header}>
         <div className={styles.topbar}>
           <div className={styles.brand}>
-            <div className={styles.logo} />
+            <button
+              className={`${styles.btn} ${styles.tiny}`}
+              onClick={() => navigate(-1)}
+              type="button"
+            >
+              ← Volver
+            </button>
             <div>
               <div className={styles.title}>{derivedName}</div>
-              <div className={styles.subtitle}>
-                Presentación • Configuración • Plantilla
-              </div>
             </div>
           </div>
 
-          <span className={styles.pill}>{docPill}</span>
           <span className={styles.pill}>{selectionPill}</span>
 
           <div className={styles.grow} />
@@ -1749,14 +1751,6 @@ export default function FileDetail() {
             disabled={loading || !!err}
           >
             Exportar JSON
-          </button>
-
-          <button
-            className={`${styles.btn} ${styles.tiny}`}
-            onClick={() => navigate(-1)}
-            type="button"
-          >
-            ← Volver
           </button>
         </div>
 
@@ -2298,18 +2292,6 @@ export default function FileDetail() {
 
                   <div className={styles.row2}>
                     <div className={styles.field}>
-                      <div className={styles.label}>Peso</div>
-                      <input
-                        className={styles.cellInput}
-                        type="number"
-                        step="0.1"
-                        value={String(draft.weight ?? 1)}
-                        onChange={(e) =>
-                          setDraft((p) => ({ ...p, weight: e.target.value }))
-                        }
-                      />
-                    </div>
-                    <div className={styles.field}>
                       <div className={styles.label}>Padre</div>
                       <select
                         className={styles.cellSelect}
@@ -2330,34 +2312,7 @@ export default function FileDetail() {
                     </div>
                   </div>
 
-                  <div className={styles.row2}>
-                    <div className={styles.field}>
-                      <div className={styles.label}>Requerido</div>
-                      <select
-                        className={styles.cellSelect}
-                        value={draft.required}
-                        onChange={(e) =>
-                          setDraft((p) => ({ ...p, required: e.target.value }))
-                        }
-                      >
-                        <option value="true">Sí</option>
-                        <option value="false">No</option>
-                      </select>
-                    </div>
-                    <div className={styles.field}>
-                      <div className={styles.label}>Activo</div>
-                      <select
-                        className={styles.cellSelect}
-                        value={draft.active}
-                        onChange={(e) =>
-                          setDraft((p) => ({ ...p, active: e.target.value }))
-                        }
-                      >
-                        <option value="true">Sí</option>
-                        <option value="false">No</option>
-                      </select>
-                    </div>
-                  </div>
+                  <div className={styles.row2}></div>
 
                   <div className={styles.field}>
                     <div className={styles.label}>Observaciones</div>
