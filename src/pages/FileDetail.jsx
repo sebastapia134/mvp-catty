@@ -30,6 +30,13 @@ const DEFAULT_SCALES = {
   ],
 };
 
+// Prioridades por defecto (editables por el usuario en la pestaña Configuración)
+const DEFAULT_PRIORITY_LEVELS = [
+  { id: "low", name: "Baja", min: 0, max: 33 },
+  { id: "medium", name: "Media", min: 33, max: 66 },
+  { id: "high", name: "Alta", min: 66, max: 100 },
+];
+
 // Convierte a número si es posible; devuelve null si no es numérico.
 function toNumericOrNull(raw) {
   const n = Number(raw);
@@ -634,6 +641,22 @@ function adaptEditorPayload(raw, fallbackScales) {
 
   const nodes = normalizeNodesAny(payload, scales);
 
+  // Prioridades: si vienen desde el JSON, las respetamos; si no, usamos defaults.
+  const priorityLevelsRaw =
+    payload.priorityLevels ||
+    payload.priority_levels ||
+    payload.priorities ||
+    null;
+
+  const priorityLevels = Array.isArray(priorityLevelsRaw)
+    ? priorityLevelsRaw.map((p, idx) => ({
+        id: p.id || p.key || `prio_${idx}`,
+        name: p.name || p.label || `Nivel ${idx + 1}`,
+        min: Number(p.min ?? 0),
+        max: Number(p.max ?? 100),
+      }))
+    : null;
+
   const selectedIdRaw =
     payload.selectedId || payload.selected_id || payload.seleccion || null;
 
@@ -656,6 +679,7 @@ function adaptEditorPayload(raw, fallbackScales) {
     nodes,
     selectedId,
     warning,
+    priorityLevels: priorityLevels || null,
   };
 }
 
@@ -695,6 +719,144 @@ function findField(o, candidates) {
   return undefined;
 }
 
+/**
+ * Etapa 1 – cálculo dinámico de severidad (0–100)
+ */
+function computeSeverityPercent(scales, viKey, vcKey) {
+  const viList = scales?.VI || DEFAULT_SCALES.VI;
+  const vcList = scales?.VC || DEFAULT_SCALES.VC;
+
+  if (!viList.length || !vcList.length) return 0;
+
+  const vi = viValue(scales, viKey);
+  const vc = vcValue(scales, vcKey);
+
+  const viValues = viList
+    .map((s) => Number(s.value))
+    .filter((n) => Number.isFinite(n));
+  const vcValues = vcList
+    .map((s) => Number(s.value))
+    .filter((n) => Number.isFinite(n));
+
+  if (!viValues.length || !vcValues.length) return 0;
+
+  const VI_max = Math.max(...viValues);
+  const VC_max = Math.max(...vcValues);
+  const VC_min = Math.min(...vcValues);
+
+  const denom = VI_max * (VC_max - VC_min);
+  if (!Number.isFinite(vi) || !Number.isFinite(vc) || denom <= 0) return 0;
+
+  const severity = ((vi * (VC_max - vc)) / denom) * 100;
+  return Math.max(0, Math.min(100, Math.round(severity)));
+}
+
+/**
+ * Etapa 2 – clasificación de prioridad configurable
+ * levels: [{name,min,max}]   severityPct: 0–100
+ */
+function classifyPriority(levels, severityPct) {
+  if (!Array.isArray(levels) || !levels.length) return "";
+  const s = Number(severityPct);
+  if (!Number.isFinite(s)) return "";
+  const found = levels.find(
+    (lvl) => s >= Number(lvl.min ?? 0) && s < Number(lvl.max ?? 100) // [min, max)
+  );
+  return found?.name || "";
+}
+
+/**
+ * Calcula nivel_aplicacion y nivel_importancia para cada nodo:
+ * - ÍTEM: nivel_aplicacion = valor VC, nivel_importancia = valor VI
+ * - Agrupación/Level:
+ *   - nivel_aplicacion = mínimo nivel_aplicacion de hijos ITEM
+ *   - nivel_importancia = máximo nivel_importancia de hijos ITEM
+ */
+function computeLevelsForExport(nodes, scales) {
+  const byParent = new Map();
+  for (const n of nodes) {
+    const pid = n.parentId == null ? null : String(n.parentId);
+    if (!byParent.has(pid)) byParent.set(pid, []);
+    byParent.get(pid).push(n);
+  }
+
+  const viCache = new Map();
+  const vcCache = new Map();
+  const viList = scales?.VI || DEFAULT_SCALES.VI;
+  const vcList = scales?.VC || DEFAULT_SCALES.VC;
+  for (const s of viList) viCache.set(s.key, Number(s.value));
+  for (const s of vcList) vcCache.set(s.key, Number(s.value));
+
+  const result = new Map(); // id -> { nivel_aplicacion, nivel_importancia }
+
+  function ensureLevels(node) {
+    if (result.has(node.id)) return result.get(node.id);
+
+    if (node.type === TYPES.ITEM) {
+      const vi = viCache.get(node.viKey) ?? viValue(scales, node.viKey);
+      const vc = vcCache.get(node.vcKey) ?? vcValue(scales, node.vcKey);
+      const levels = {
+        nivel_aplicacion: Number.isFinite(vc) ? vc : null,
+        nivel_importancia: Number.isFinite(vi) ? vi : null,
+      };
+      result.set(node.id, levels);
+      return levels;
+    }
+
+    const children = byParent.get(String(node.id)) || [];
+    const childItems = children.filter((c) => c.type === TYPES.ITEM);
+
+    let allItemLevels = [];
+
+    function gatherItemLevels(subnode) {
+      const kids = byParent.get(String(subnode.id)) || [];
+      for (const k of kids) {
+        if (k.type === TYPES.ITEM) {
+          const lv = ensureLevels(k);
+          allItemLevels.push(lv);
+        } else {
+          gatherItemLevels(k);
+        }
+      }
+    }
+
+    for (const c of childItems) {
+      const lv = ensureLevels(c);
+      allItemLevels.push(lv);
+    }
+
+    if (!childItems.length) {
+      gatherItemLevels(node);
+    }
+
+    if (!allItemLevels.length) {
+      const levels = { nivel_aplicacion: null, nivel_importancia: null };
+      result.set(node.id, levels);
+      return levels;
+    }
+
+    const aplicValues = allItemLevels
+      .map((l) => l.nivel_aplicacion)
+      .filter((v) => Number.isFinite(v));
+    const impValues = allItemLevels
+      .map((l) => l.nivel_importancia)
+      .filter((v) => Number.isFinite(v));
+
+    const nivel_aplicacion =
+      aplicValues.length > 0 ? Math.min(...aplicValues) : null;
+    const nivel_importancia =
+      impValues.length > 0 ? Math.max(...impValues) : null;
+
+    const levels = { nivel_aplicacion, nivel_importancia };
+    result.set(node.id, levels);
+    return levels;
+  }
+
+  for (const n of nodes) ensureLevels(n);
+
+  return result;
+}
+
 function editedToOriginal(edited, options = {}) {
   const preserveScales = !!options.preserveScales;
 
@@ -703,57 +865,51 @@ function editedToOriginal(edited, options = {}) {
   const questionsOut = edited.questions || {};
   const uiOut = edited.ui || { showMeta: true };
 
-  const nodesOut = (Array.isArray(edited.nodes) ? edited.nodes : []).map(
-    (n) => {
-      const idOut = toNumericOrNull(n.id) ?? n.id;
-      const code = String(n.code ?? n.codigo ?? "").trim();
-      const [p1, p2, p3, p4, p5] = parseHierarchyParts(code);
+  const nodes = Array.isArray(edited.nodes) ? edited.nodes : [];
+  const priorityLevelsOut = Array.isArray(edited.priorityLevels)
+    ? edited.priorityLevels.map((p, idx) => ({
+        id: p.id || `prio_${idx}`,
+        name: p.name || `Nivel ${idx + 1}`,
+        min: Number(p.min ?? 0),
+        max: Number(p.max ?? 100),
+      }))
+    : [];
 
-      const agrup_es =
-        n.agrupacion_es ??
-        findField(n, [
-          "agrupacion_es",
-          "agrupación_es",
-          "agrupacion_español",
-        ]) ??
-        null;
+  const levelsById = computeLevelsForExport(nodes, edited.scales);
 
-      const observaciones =
-        n.observaciones ?? findField(n, ["observaciones", "obs"]) ?? null;
+  const nodesOut = nodes.map((n) => {
+    const idOut = toNumericOrNull(n.id) ?? n.id;
+    const code = String(n.code ?? n.codigo ?? "").trim();
+    const [p1, p2, p3, p4, p5] = parseHierarchyParts(code);
 
-      const nivel_aplicacion =
-        n.nivel_aplicacion ??
-        findField(n, ["nivel_aplicacion", "nivel_aplicación"]) ??
-        null;
+    const observaciones =
+      n.observaciones ?? findField(n, ["observaciones", "obs"]) ?? null;
 
-      const nivel_importancia =
-        n.nivel_importancia ??
-        findField(n, ["nivel_importancia", "nivel_importancia"]) ??
-        null;
+    const levelInfo = levelsById.get(n.id) || {
+      nivel_aplicacion: null,
+      nivel_importancia: null,
+    };
 
-      const rawParent = n.parentId ?? n.parent ?? null;
-      const parentOut =
-        rawParent == null ? null : toNumericOrNull(rawParent) ?? rawParent;
+    const nivel_aplicacion = levelInfo.nivel_aplicacion ?? null;
+    const nivel_importancia = levelInfo.nivel_importancia ?? null;
 
-      return {
-        id: idOut,
-        1: p1,
-        2: p2,
-        3: p3,
-        4: p4,
-        5: p5,
-        tipo: mapTypeToOriginal(n.type),
-        codigo: code,
-        descripcion: n.desc ?? n.descripcion ?? "",
-        agrupacion_en: n.title ?? n.agrupacion_en ?? "",
-        agrupacion_es: agrup_es ?? null,
-        observaciones: observaciones ?? null,
-        nivel_aplicacion: nivel_aplicacion ?? null,
-        nivel_importancia: nivel_importancia ?? null,
-        parent: parentOut,
-      };
-    }
-  );
+    return {
+      id: idOut,
+      1: p1,
+      2: p2,
+      3: p3,
+      4: p4,
+      5: p5,
+      tipo: mapTypeToOriginal(n.type),
+      codigo: code,
+      descripcion: n.desc ?? n.descripcion ?? "",
+      agrupacion_en: n.title ?? n.agrupacion_en ?? "",
+      observaciones: observaciones ?? null,
+      nivel_aplicacion,
+      nivel_importancia,
+      // parentId, parent, agrupacion_es removidos
+    };
+  });
 
   const out = {
     meta: metaOut,
@@ -761,6 +917,7 @@ function editedToOriginal(edited, options = {}) {
     questions: questionsOut,
     ui: uiOut,
     nodes: nodesOut,
+    priorityLevels: priorityLevelsOut,
   };
 
   if (preserveScales && edited.scales) {
@@ -874,6 +1031,8 @@ export default function FileDetail() {
   const [scales, setScales] = useState(DEFAULT_SCALES);
   const [nodes, setNodes] = useState([]);
   const [ui, setUi] = useState({ showMeta: true });
+  const [priorityLevels, setPriorityLevels] = useState(DEFAULT_PRIORITY_LEVELS);
+
   const nextIdRef = useRef(1);
 
   const [selectedId, setSelectedId] = useState(null);
@@ -953,6 +1112,7 @@ export default function FileDetail() {
       nodes: nds,
       selectedId: sel,
       warning,
+      priorityLevels: prios,
     } = adaptEditorPayload(raw, DEFAULT_SCALES);
 
     setMeta(m || {});
@@ -960,12 +1120,26 @@ export default function FileDetail() {
     setQuestions(q || {});
     setScales(sc || DEFAULT_SCALES);
 
+    // prioridad: si viene del JSON la usamos, sino defaults
+    if (Array.isArray(prios) && prios.length) {
+      setPriorityLevels(
+        prios.map((p, idx) => ({
+          id: p.id || p.key || `prio_${idx}`,
+          name: p.name || p.label || `Nivel ${idx + 1}`,
+          min: Number(p.min ?? 0),
+          max: Number(p.max ?? 100),
+        }))
+      );
+    } else {
+      setPriorityLevels(DEFAULT_PRIORITY_LEVELS);
+    }
+
     let counter = 1;
     const normalizedNodes = (Array.isArray(nds) ? nds : []).map((n) =>
       normalizeNodeIds(n, () => counter++)
     );
     const maxId = normalizedNodes.reduce(
-      (m, n) => (Number.isFinite(n.id) ? Math.max(m, n.id) : m),
+      (m2, n2) => (Number.isFinite(n2.id) ? Math.max(m2, n2.id) : m2),
       0
     );
     nextIdRef.current = Math.max(maxId + 1, counter);
@@ -1065,7 +1239,7 @@ export default function FileDetail() {
     const sibs = nodes.filter(
       (n) => (n.parentId == null ? "__root__" : String(n.parentId)) === pid
     );
-    const max = sibs.reduce((m, n) => Math.max(m, Number(n.order || 0)), 0);
+    const max = sibs.reduce((m2, n2) => Math.max(m2, Number(n2.order || 0)), 0);
     return max + 10;
   }
 
@@ -1292,6 +1466,7 @@ export default function FileDetail() {
           scales,
           ui,
           nodes,
+          priorityLevels,
         },
         { preserveScales: !!originalHadScales }
       );
@@ -1321,6 +1496,7 @@ export default function FileDetail() {
         scales,
         ui,
         nodes,
+        priorityLevels,
       },
       { preserveScales: !!scales }
     );
@@ -1392,8 +1568,9 @@ export default function FileDetail() {
           code: String(draft.code || "").trim(),
           title: String(draft.title || "").trim(),
           desc: String(draft.desc || ""),
-          viKey: draft.viKey,
-          vcKey: draft.vcKey,
+          // VI/VC sólo se editan si es ITEM; en agrupaciones quedan como están
+          viKey: n.type === TYPES.ITEM ? draft.viKey : n.viKey,
+          vcKey: n.type === TYPES.ITEM ? draft.vcKey : n.vcKey,
           weight: Number(draft.weight || 0),
           parentId: newParentId,
           order: parentChanged ? nextOrderForParent(newParentId) : n.order,
@@ -1503,6 +1680,21 @@ export default function FileDetail() {
     });
     markDirty("Eliminada opción de escala.");
   }
+
+  // PRIORIDAD: datos para sección de configuración
+  const viValues = (scales?.VI || [])
+    .map((s) => Number(s.value))
+    .filter(Number.isFinite);
+  const vcValues = (scales?.VC || [])
+    .map((s) => Number(s.value))
+    .filter(Number.isFinite);
+  const VI_max = viValues.length ? Math.max(...viValues) : null;
+  const VC_max = vcValues.length ? Math.max(...vcValues) : null;
+  const VC_min = vcValues.length ? Math.min(...vcValues) : null;
+  const prioridadMax =
+    VI_max != null && VC_max != null && VC_min != null
+      ? VI_max * (VC_max - VC_min)
+      : null;
 
   const derivedName = file?.name || "Checklist";
 
@@ -1648,14 +1840,16 @@ export default function FileDetail() {
         </main>
       )}
 
-      {/* CONFIGURACIÓN VI/VC */}
+      {/* CONFIGURACIÓN VI/VC + PRIORIDAD */}
       {activeTab === "config" && (
         <main className={styles.configLayout}>
+          {/* VI */}
           <section className={styles.panelWide}>
             <h2 className={styles.sectionTitle}>Escalas VI</h2>
             <p className={styles.hint}>
               Edita las opciones de importancia (VI). Puedes añadir opciones
-              como “Aplica mucho” con valor 4, cambiar textos o eliminar filas.
+              como “Aplica mucho” con valores superiores, cambiar textos o
+              eliminar filas. La lógica de severidad se adapta dinámicamente.
             </p>
 
             <table className={styles.scaleTable}>
@@ -1723,11 +1917,13 @@ export default function FileDetail() {
             </button>
           </section>
 
+          {/* VC */}
           <section className={styles.panelWide}>
             <h2 className={styles.sectionTitle}>Escalas VC</h2>
             <p className={styles.hint}>
-              Edita las opciones de aplicación (VC). Ejemplo: “Aplica mucho” con
-              valor 4.
+              Edita las opciones de cumplimiento / aplicación (VC). Por ejemplo:
+              “Aplica mucho” con valor 4. La severidad se recalcula
+              automáticamente sin depender de rangos fijos.
             </p>
 
             <table className={styles.scaleTable}>
@@ -1793,6 +1989,152 @@ export default function FileDetail() {
             >
               + Añadir opción VC
             </button>
+          </section>
+
+          {/* PRIORIDAD – Etapa 2: niveles configurables */}
+          <section className={styles.panelWide}>
+            <h2 className={styles.sectionTitle}>
+              Niveles de prioridad (configurables)
+            </h2>
+            <p className={styles.hint}>
+              1. Primero se calcula un porcentaje de severidad (0–100) con:
+              <br />
+              <b>
+                severity_pct = (VI × (VC_max − VC)) /(VI_max × (VC_max −
+                VC_min)) × 100
+              </b>
+              .
+            </p>
+            <p className={styles.hint}>
+              2. Luego se asigna una prioridad según el intervalo en el que cae
+              <code>severity_pct</code>. Puedes definir cualquier número de
+              niveles y nombres sin cambiar la lógica.
+            </p>
+
+            <table className={styles.scaleTable}>
+              <thead>
+                <tr>
+                  <th>Nombre del nivel</th>
+                  <th>% mínimo (incl.)</th>
+                  <th>% máximo (excl.)</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {priorityLevels.map((lvl, idx) => (
+                  <tr key={lvl.id || idx}>
+                    <td>
+                      <input
+                        className={styles.cellInput}
+                        value={lvl.name}
+                        onChange={(e) =>
+                          setPriorityLevels((prev) => {
+                            const list = [...prev];
+                            list[idx] = { ...list[idx], name: e.target.value };
+                            return list;
+                          })
+                        }
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className={`${styles.cellInput} ${styles.mini}`}
+                        type="number"
+                        value={String(lvl.min)}
+                        onChange={(e) =>
+                          setPriorityLevels((prev) => {
+                            const list = [...prev];
+                            list[idx] = {
+                              ...list[idx],
+                              min: Number(e.target.value || 0),
+                            };
+                            return list;
+                          })
+                        }
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className={`${styles.cellInput} ${styles.mini}`}
+                        type="number"
+                        value={String(lvl.max)}
+                        onChange={(e) =>
+                          setPriorityLevels((prev) => {
+                            const list = [...prev];
+                            list[idx] = {
+                              ...list[idx],
+                              max: Number(e.target.value || 0),
+                            };
+                            return list;
+                          })
+                        }
+                      />
+                    </td>
+                    <td className={styles.actionsCol}>
+                      <button
+                        type="button"
+                        className={`${styles.iconbtn} ${styles.iconDanger}`}
+                        onClick={() =>
+                          setPriorityLevels((prev) =>
+                            prev.filter((_, i) => i !== idx)
+                          )
+                        }
+                        title="Eliminar nivel"
+                      >
+                        🗑
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {priorityLevels.length === 0 && (
+                  <tr>
+                    <td colSpan={4}>
+                      <div className={styles.hint}>
+                        No hay niveles definidos. Añade al menos uno para poder
+                        clasificar la prioridad.
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+
+            <button
+              type="button"
+              className={`${styles.btn} ${styles.primary}`}
+              onClick={() =>
+                setPriorityLevels((prev) => [
+                  ...prev,
+                  {
+                    id: `prio_${prev.length + 1}`,
+                    name: `Nivel ${prev.length + 1}`,
+                    min: 0,
+                    max: 100,
+                  },
+                ])
+              }
+              style={{ marginTop: 8 }}
+            >
+              + Añadir nivel de prioridad
+            </button>
+
+            <div className={styles.metaIntro} style={{ marginTop: 12 }}>
+              <div className={styles.metaP}>
+                <b>Valores actuales de VI/VC detectados:</b>
+                <br />
+                VI_max:{" "}
+                {VI_max != null ? String(VI_max) : "— (no hay valores VI)"}
+                <br />
+                VC_min:{" "}
+                {VC_min != null ? String(VC_min) : "— (no hay valores VC)"}
+                <br />
+                VC_max:{" "}
+                {VC_max != null ? String(VC_max) : "— (no hay valores VC)"}
+                <br />
+                Severidad máxima teórica (denominador):{" "}
+                {prioridadMax != null ? String(prioridadMax) : "—"}
+              </div>
+            </div>
           </section>
         </main>
       )}
@@ -1916,40 +2258,43 @@ export default function FileDetail() {
                     />
                   </div>
 
-                  <div className={styles.row2}>
-                    <div className={styles.field}>
-                      <div className={styles.label}>Escala VI</div>
-                      <select
-                        className={styles.cellSelect}
-                        value={draft.viKey}
-                        onChange={(e) =>
-                          setDraft((p) => ({ ...p, viKey: e.target.value }))
-                        }
-                      >
-                        {(scales?.VI || DEFAULT_SCALES.VI).map((s) => (
-                          <option key={s.key} value={s.key}>
-                            {s.label}
-                          </option>
-                        ))}
-                      </select>
+                  {/* VI/VC SOLO para ÍTEMS: para agrupaciones no se muestran */}
+                  {selectedNode.type === TYPES.ITEM && (
+                    <div className={styles.row2}>
+                      <div className={styles.field}>
+                        <div className={styles.label}>Escala VI</div>
+                        <select
+                          className={styles.cellSelect}
+                          value={draft.viKey}
+                          onChange={(e) =>
+                            setDraft((p) => ({ ...p, viKey: e.target.value }))
+                          }
+                        >
+                          {(scales?.VI || DEFAULT_SCALES.VI).map((s) => (
+                            <option key={s.key} value={s.key}>
+                              {s.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className={styles.field}>
+                        <div className={styles.label}>Escala VC</div>
+                        <select
+                          className={styles.cellSelect}
+                          value={draft.vcKey}
+                          onChange={(e) =>
+                            setDraft((p) => ({ ...p, vcKey: e.target.value }))
+                          }
+                        >
+                          {(scales?.VC || DEFAULT_SCALES.VC).map((s) => (
+                            <option key={s.key} value={s.key}>
+                              {s.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
                     </div>
-                    <div className={styles.field}>
-                      <div className={styles.label}>Escala VC</div>
-                      <select
-                        className={styles.cellSelect}
-                        value={draft.vcKey}
-                        onChange={(e) =>
-                          setDraft((p) => ({ ...p, vcKey: e.target.value }))
-                        }
-                      >
-                        {(scales?.VC || DEFAULT_SCALES.VC).map((s) => (
-                          <option key={s.key} value={s.key}>
-                            {s.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
+                  )}
 
                   <div className={styles.row2}>
                     <div className={styles.field}>
@@ -2040,6 +2385,45 @@ export default function FileDetail() {
                       placeholder="Texto largo, ejemplos, guía para el evaluador…"
                     />
                   </div>
+
+                  {/* Vista rápida de severidad y prioridad SOLO para ÍTEMS */}
+                  {selectedNode.type === TYPES.ITEM && (
+                    <>
+                      <div className={styles.field}>
+                        <div className={styles.label}>
+                          Severidad normalizada (0–100)
+                        </div>
+                        <input
+                          className={styles.cellInput}
+                          disabled
+                          value={`${computeSeverityPercent(
+                            scales,
+                            draft.viKey,
+                            draft.vcKey
+                          )} %`}
+                        />
+                      </div>
+                      <div className={styles.field}>
+                        <div className={styles.label}>
+                          Prioridad (según niveles configurados)
+                        </div>
+                        <input
+                          className={styles.cellInput}
+                          disabled
+                          value={
+                            classifyPriority(
+                              priorityLevels,
+                              computeSeverityPercent(
+                                scales,
+                                draft.viKey,
+                                draft.vcKey
+                              )
+                            ) || "—"
+                          }
+                        />
+                      </div>
+                    </>
+                  )}
 
                   <div className={styles.inlineActions}>
                     <button
