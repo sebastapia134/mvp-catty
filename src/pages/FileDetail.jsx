@@ -46,7 +46,7 @@ function toNumericOrNull(raw) {
 // Normaliza un nodo para que sus IDs sean numéricos.
 function normalizeNodeIds(node, nextId) {
   const maybeId = toNumericOrNull(node.id);
-  const id = maybeId !== null ? maybeId : node.id ?? nextId();
+  const id = maybeId !== null ? maybeId : (node.id ?? nextId());
 
   const p = toNumericOrNull(node.parentId);
   let parentId;
@@ -110,8 +110,8 @@ const TreeNode = memo(function TreeNode({
             node.type === TYPES.LEVEL
               ? styles.tagLevel
               : node.type === TYPES.GROUP
-              ? styles.tagGroup
-              : styles.tagItem
+                ? styles.tagGroup
+                : styles.tagItem
           }`}
         >
           {node.type}
@@ -373,8 +373,8 @@ function flattenTreeAny(treeArray, scales) {
         parentId == null || parentId === ""
           ? null
           : typeof parentId === "string" || typeof parentId === "number"
-          ? String(parentId)
-          : null,
+            ? String(parentId)
+            : null,
       viKey: coerceViKey(
         scales,
         getAny(node, [
@@ -484,8 +484,8 @@ function normalizeNodesAny(payload, scales) {
           rawParent == null || rawParent === ""
             ? null
             : typeof rawParent === "string" || typeof rawParent === "number"
-            ? String(rawParent)
-            : null,
+              ? String(rawParent)
+              : null,
         viKey: coerceViKey(
           scales,
           getAny(n, [
@@ -636,8 +636,8 @@ function adaptEditorPayload(raw, fallbackScales) {
   const intro = Array.isArray(payload.intro)
     ? payload.intro
     : Array.isArray(payload.introduccion)
-    ? payload.introduccion
-    : [];
+      ? payload.introduccion
+      : [];
 
   const questions = payload.questions || payload.preguntas || {};
 
@@ -909,6 +909,21 @@ function editedToOriginal(edited, options = {}) {
 
     const nivel_aplicacion = levelInfo.nivel_aplicacion ?? null;
     const nivel_importancia = levelInfo.nivel_importancia ?? null;
+    const severityById = new Map();
+
+    for (const n of nodesIn) {
+      const levels = levelsById.get(n.id);
+      if (!levels) continue;
+
+      const severity = computeSeverityPercent(edited.scales, n.viKey, n.vcKey);
+
+      const prioridad = classifyPriority(edited.priorityLevels, severity);
+
+      severityById.set(n.id, {
+        severity,
+        prioridad,
+      });
+    }
 
     let parentOut = null;
     const internalParent = n.parentId ?? n.parent ?? null;
@@ -926,6 +941,7 @@ function editedToOriginal(edited, options = {}) {
     // NUEVO: exportar también vi/vc
     const viKey = n.viKey ?? null;
     const vcKey = n.vcKey ?? null;
+    const sevInfo = severityById.get(n.id) || {};
 
     return {
       id: idOut,
@@ -946,6 +962,7 @@ function editedToOriginal(edited, options = {}) {
       // Campos de VI/VC para rehidratación futura
       viKey,
       vcKey,
+      prioridad: sevInfo.prioridad ?? null,
     };
   });
 
@@ -2428,10 +2445,10 @@ export default function FileDetail() {
                 {statusKind === "ok"
                   ? "OK"
                   : statusKind === "warn"
-                  ? "Atención"
-                  : statusKind === "bad"
-                  ? "Error"
-                  : "Listo"}
+                    ? "Atención"
+                    : statusKind === "bad"
+                      ? "Error"
+                      : "Listo"}
               </div>
               <div className={styles.logLine}>{statusMsg}</div>
             </div>
