@@ -959,10 +959,10 @@ function editedToOriginal(edited, options = {}) {
       nivel_importancia,
       parentId: parentOut,
       parent: parentOut,
-      // Campos de VI/VC para rehidratación futura
+      prioridad: sevInfo.prioridad ?? null,
+
       viKey,
       vcKey,
-      prioridad: sevInfo.prioridad ?? null,
     };
   });
 
