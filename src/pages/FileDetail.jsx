@@ -885,7 +885,6 @@ function editedToOriginal(edited, options = {}) {
       }))
     : [];
 
-  // 1) mapa id -> código para poder traducir padres internos (ids) a códigos
   const idToCode = new Map(
     nodesIn.map((n) => [
       String(n.id),
@@ -893,7 +892,6 @@ function editedToOriginal(edited, options = {}) {
     ])
   );
 
-  // 2) calcular niveles para exportar (como ya hacías)
   const levelsById = computeLevelsForExport(nodesIn, edited.scales);
 
   const nodesOut = nodesIn.map((n) => {
@@ -912,21 +910,22 @@ function editedToOriginal(edited, options = {}) {
     const nivel_aplicacion = levelInfo.nivel_aplicacion ?? null;
     const nivel_importancia = levelInfo.nivel_importancia ?? null;
 
-    // 3) traducir padre interno (id) -> código del padre para JSON
     let parentOut = null;
     const internalParent = n.parentId ?? n.parent ?? null;
 
     if (internalParent != null && internalParent !== "") {
       const parentCode = idToCode.get(String(internalParent));
-      // si lo encontramos por id, usamos ese código;
-      // si no, asumimos que ya venía como código y lo dejamos tal cual
       parentOut =
         parentCode != null && parentCode !== ""
           ? parentCode
           : String(internalParent);
     } else {
-      parentOut = null; // raíz
+      parentOut = null;
     }
+
+    // NUEVO: exportar también vi/vc
+    const viKey = n.viKey ?? null;
+    const vcKey = n.vcKey ?? null;
 
     return {
       id: idOut,
@@ -942,8 +941,11 @@ function editedToOriginal(edited, options = {}) {
       observaciones: observaciones ?? null,
       nivel_aplicacion,
       nivel_importancia,
-      parentId: parentOut, // <-- SIEMPRE código del padre
+      parentId: parentOut,
       parent: parentOut,
+      // Campos de VI/VC para rehidratación futura
+      viKey,
+      vcKey,
     };
   });
 
@@ -956,9 +958,7 @@ function editedToOriginal(edited, options = {}) {
     priorityLevels: priorityLevelsOut,
   };
 
-  if (preserveScales && edited.scales) {
-    out.scales = edited.scales;
-  } else if (!preserveScales && edited.scales) {
+  if (edited.scales) {
     out.scales = edited.scales;
   }
 
@@ -989,6 +989,7 @@ function baseHeaderDefs() {
     { key: "PESO", label: "Peso", width: 90 },
     { key: "REQ", label: "Req.", width: 90 },
     { key: "ACTIVO", label: "Activo", width: 100 },
+    { key: "PRIORIDAD", label: "Prioridad", width: 120 },
   ];
 }
 

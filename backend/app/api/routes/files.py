@@ -388,6 +388,8 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
                         "required": r.get("required"),
                         "active": r.get("active"),
                         "order": r.get("order"),
+                        "prioridad": r.get("prioridad"),
+
                     }
                     # probar algunas claves comunes basadas en colk normalizado
                     if nk in ("id", "codigo", "code", "cod"):
