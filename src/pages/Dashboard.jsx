@@ -260,12 +260,6 @@ export default function Dashboard() {
             <div className={styles.statValue}>{files.length}</div>
           </div>
 
-          <div className={styles.statCard}>
-            <div className={styles.statLabel}>Tamaño usado</div>
-            <div className={styles.statValue}>{formatBytes(totalBytes)}</div>
-            <div className={styles.statHint}>Tamaño del JSON</div>
-          </div>
-
           <div className={styles.statCardWide}>
             <button
               className={styles.primaryBtn}

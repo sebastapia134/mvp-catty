@@ -1772,14 +1772,6 @@ export default function FileDetail() {
 
           <button
             className={styles.btn}
-            onClick={validate}
-            type="button"
-            disabled={loading || !!err}
-          >
-            Validar
-          </button>
-          <button
-            className={styles.btn}
             onClick={handleSave}
             type="button"
             disabled={loading || !!err || saving || !dirty}

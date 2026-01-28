@@ -217,58 +217,54 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
     ws = wb.active
     ws.title = "Checklist"
 
-    keys, headers, types = _unique_headers(columns)
+    keys = [
+        "codigo",
+        "agrupacion_en",
+        "descripcion",
+        "observaciones",
+        "nivel_aplicacion",
+        "nivel_importancia",
+        "prioridad",
+    ]
+    headers = [
+        "codigo",
+        "agrupacion_en",
+        "descripcion",
+        "observaciones",
+        "nivel_aplicacion",
+        "nivel_importancia",
+        "prioridad",
+    ]
+    types = [""] * len(keys)
 
-    # Si no vienen columnas definidas, inferimos keys de forma determinista
-    # y también incluimos las keys dentro de cada nodo.custom
-    if (not keys) and isinstance(nodes, list) and nodes:
-        seen = []
-        seen_set = set()
-
-        # Prioriza campos comunes en orden útil
-        preferred = ["id", "code", "title", "type", "parentId", "viKey", "vcKey", "weight", "required", "active", "order"]
-
-        # Recolecta todas las keys (incluye custom) manteniendo determinismo:
-        for r in nodes:
-            if not isinstance(r, dict):
-                continue
-            # top-level keys
-            for k in r.keys():
-                if k == "custom":
-                    continue
-                kk = str(k)
-                if kk not in seen_set:
-                    seen.append(kk)
-                    seen_set.add(kk)
-            # custom keys
-            custom = r.get("custom") or {}
-            if isinstance(custom, dict):
-                for k in custom.keys():
-                    kk = str(k)
-                    if kk not in seen_set:
-                        seen.append(kk)
-                        seen_set.add(kk)
-
-        # Ordena: preferred primero si existen, luego el resto en el orden observado
-        ordered = []
-        for p in preferred:
-            if p in seen_set and p not in ordered:
-                ordered.append(p)
-        for s in seen:
-            if s not in ordered:
-                ordered.append(s)
-
-        keys = ordered
-        headers = keys
-        types = [""] * len(keys)
-
-    # Escribe encabezados y aplica estilo
+    # Escribimos encabezados
     ws.append(headers)
     _apply_header_style(ws)
 
     # Para cada nodo, construye un mapa plano que combine top-level + custom,
     # y hace lookup tolerante (case-insensitive + normalizado)
     if isinstance(nodes, list):
+        # Construimos mapas valor -> label para VI/VC a partir de data.scales
+        scales = (data.get("scales") or {}) if isinstance(data, dict) else {}
+        vi_scale = scales.get("VI") or []
+        vc_scale = scales.get("VC") or []
+
+        vi_label_by_value = {}
+        for s in vi_scale:
+            try:
+                v = float(s.get("value"))
+            except Exception:
+                continue
+            vi_label_by_value[v] = s.get("label") or ""
+
+        vc_label_by_value = {}
+        for s in vc_scale:
+            try:
+                v = float(s.get("value"))
+            except Exception:
+                continue
+            vc_label_by_value[v] = s.get("label") or ""
+
         # helper para normalizar nombres de clave (quita acentos y caracteres no ascii, lower)
         def norm_str(s):
             if s is None:
@@ -292,7 +288,6 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
                 for kk, vv in r.items():
                     if kk == "custom":
                         continue
-                    # siempre convertir la key a str para evitar keys no-string
                     flat[str(kk)] = vv
             if isinstance(custom, dict):
                 for kk, vv in custom.items():
@@ -304,9 +299,6 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
             flat_upper = {str(k).upper(): v for k, v in flat.items()}
             flat_norm = {norm_str(k): v for k, v in flat.items()}
 
-            # también guardamos list of present normalized keys (por heurísticos)
-            present_norm_keys = set(flat_norm.keys())
-
             row = []
             for colk in keys:
                 val = None
@@ -315,13 +307,17 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
                 c0 = str(colk or "")
                 cand_list = [c0, c0.lower(), c0.upper(), norm_str(c0)]
 
-                # heurísticos adicionales: para claves numéricas, probar versiones sin/ con ceros, y si la columna suena a 'agrup' probar variaciones
+                # heurísticos adicionales: si la columna suena a 'agrup' probar variaciones
                 nk = norm_str(c0)
                 if nk and ("agrup" in nk or "agrupa" in nk or "agr" in nk):
-                    # posibles campos en nodos que contienen agrupación
-                    cand_list += ["agrupacion", "agrupacion_es", "agrupacion_en", "agrupación", "agrupación_es", "agrupación_en"]
-                if nk and nk.isdigit():
-                    cand_list += [nk]  # ya incluido; es para claridad
+                    cand_list += [
+                        "agrupacion",
+                        "agrupacion_es",
+                        "agrupacion_en",
+                        "agrupación",
+                        "agrupación_es",
+                        "agrupación_en",
+                    ]
 
                 # probar candidatos en orden: exacto en flat, luego lower/upper/norm
                 for c in cand_list:
@@ -338,44 +334,8 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
                         val = flat_norm[c]
                         break
 
-                # caso especial: si buscamos parent code (columna puede llamarse PARENT_CODE o parentCode)
-                if val is None and "parent" in nk:
-                    # intentar resolver por parentId -> buscar nodo padre y obtener su code
-                    pid = r.get("parentId") or r.get("parent") or None
-                    if pid:
-                        # pid puede ser uuid o número; buscamos en list nodes por id
-                        parent_node = None
-                        for p in nodes:
-                            try:
-                                if str(p.get("id")) == str(pid):
-                                    parent_node = p
-                                    break
-                            except Exception:
-                                continue
-                        if parent_node:
-                            val = parent_node.get("code") or parent_node.get("codigo") or ""
-
-                # vi/vc label mapping: si columna sugiere "vi_label" o "vc_label" y el valor es clave tipo "VI_3" mapear a label si scales existen
-                if isinstance(val, str) and val and (("vi" in nk and "label" in nk) or nk == "vilabel"):
-                    try:
-                        for s in (data.get("scales") or {}).get("VI", []) or []:
-                            if s.get("key") == val:
-                                val = s.get("label") or val
-                                break
-                    except Exception:
-                        pass
-                if isinstance(val, str) and val and (("vc" in nk and "label" in nk) or nk == "vclabel"):
-                    try:
-                        for s in (data.get("scales") or {}).get("VC", []) or []:
-                            if s.get("key") == val:
-                                val = s.get("label") or val
-                                break
-                    except Exception:
-                        pass
-
                 # fallback: si ninguna coincidencia, intentar usar propiedades estándar
                 if val is None:
-                    # common names
                     std_map = {
                         "id": r.get("id"),
                         "code": r.get("code") or r.get("codigo"),
@@ -389,26 +349,47 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
                         "active": r.get("active"),
                         "order": r.get("order"),
                         "prioridad": r.get("prioridad"),
-
+                        "agrupacion_en": r.get("agrupacion_en") or r.get("title"),
+                        "observaciones": r.get("observaciones") or r.get("obs"),
+                        "nivel_aplicacion": r.get("nivel_aplicacion"),
+                        "nivel_importancia": r.get("nivel_importancia"),
                     }
-                    # probar algunas claves comunes basadas en colk normalizado
-                    if nk in ("id", "codigo", "code", "cod"):
-                        val = std_map.get("id") if nk == "id" else std_map.get("code")
-                    elif "title" in nk or "enunci" in nk or "nombre" in nk:
-                        val = std_map.get("title")
-                    elif "observ" in nk:
-                        val = r.get("observaciones") or r.get("obs") or ""
+
+                    if nk in ("codigo", "code", "cod"):
+                        val = std_map.get("code")
+                    elif "agrup" in nk:
+                        val = std_map.get("agrupacion_en")
                     elif "desc" in nk or "descrip" in nk:
-                         val = std_map.get("desc")
-                    elif "vi" in nk and "label" not in nk:
-                        val = std_map.get("vikey")
-                    elif "vc" in nk and "label" not in nk:
-                        val = std_map.get("vckey")
-                    # si sigue None, ponemos cadena vacía abajo
+                        val = std_map.get("desc")
+                    elif "observ" in nk:
+                        val = std_map.get("observaciones")
+                    elif "nivelaplicacion" in nk:
+                        val = std_map.get("nivel_aplicacion")
+                    elif "nivelimportancia" in nk:
+                        val = std_map.get("nivel_importancia")
+                    elif nk in ("prioridad",):
+                        val = std_map.get("prioridad")
 
                 # default a cadena vacía si todavía None
                 if val is None:
                     val = ""
+
+                # Para nivel_aplicacion / nivel_importancia queremos label, no número
+                col_norm = norm_str(colk)
+                if col_norm in ("nivel_aplicacion", "nivelaplicacion"):
+                    try:
+                        num = float(val)
+                        if num in vc_label_by_value:
+                            val = vc_label_by_value[num]
+                    except Exception:
+                        pass
+                elif col_norm in ("nivel_importancia", "nivelimportancia"):
+                    try:
+                        num = float(val)
+                        if num in vi_label_by_value:
+                            val = vi_label_by_value[num]
+                    except Exception:
+                        pass
 
                 # serializar dict/list para que openpyxl no falle
                 if isinstance(val, (dict, list)):
@@ -436,8 +417,6 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
             width = 90
         elif t in ("text",):
             width = 40
-        elif k in ("1", "2", "3", "4", "5", "id"):
-            width = 6
         elif "descrip" in hlow:
             width = 90
         elif "observ" in hlow:
@@ -451,6 +430,7 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
             for cell in ws[get_column_letter(idx)][1:]:
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
 
+    # ----- resto de hojas (Meta, Preguntas, Intro, Columnas) se quedan igual -----
     ws_meta = wb.create_sheet("Meta")
     ws_meta.append(["Campo", "Valor"])
     _apply_header_style(ws_meta)
@@ -521,7 +501,6 @@ def _build_file_xlsx(f: File) -> io.BytesIO:
     wb.save(buf)
     buf.seek(0)
     return buf
-
 @router.get("/{file_id}/export.xlsx")
 def export_file_xlsx(file_id: str, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     f = _resolve_file(db, current_user, file_id)
