@@ -367,7 +367,7 @@ function flattenTreeAny(treeArray, scales) {
       title,
       desc: String(
         getAny(node, ["desc", "descripcion", "descripción", "ayuda", "help"]) ??
-          ""
+          "",
       ),
       parentId:
         parentId == null || parentId === ""
@@ -383,11 +383,11 @@ function flattenTreeAny(treeArray, scales) {
           "vi_key",
           "nivel_importancia",
           "importancia",
-        ])
+        ]),
       ),
       vcKey: coerceVcKey(
         scales,
-        getAny(node, ["vcKey", "vc", "vc_key", "aplica"])
+        getAny(node, ["vcKey", "vc", "vc_key", "aplica"]),
       ),
       weight: coerceNumber(getAny(node, ["weight", "peso"]), 1),
       required: coerceBool(getAny(node, ["required", "requerido"]), true),
@@ -478,7 +478,7 @@ function normalizeNodesAny(payload, scales) {
         title,
         desc: String(
           getAny(n, ["desc", "descripcion", "descripción", "ayuda", "help"]) ??
-            ""
+            "",
         ),
         parentId:
           rawParent == null || rawParent === ""
@@ -494,11 +494,11 @@ function normalizeNodesAny(payload, scales) {
             "vi_key",
             "nivel_importancia",
             "importancia",
-          ])
+          ]),
         ),
         vcKey: coerceVcKey(
           scales,
-          getAny(n, ["vcKey", "vc", "vc_key", "aplica"])
+          getAny(n, ["vcKey", "vc", "vc_key", "aplica"]),
         ),
         weight: coerceNumber(getAny(n, ["weight", "peso"]), 1),
         required: coerceBool(getAny(n, ["required", "requerido"]), true),
@@ -528,7 +528,7 @@ function normalizeNodesAny(payload, scales) {
         const code = String(
           getAny(r, ["code", "codigo", "código"]) ??
             getByRegex(r, [/^code$/, /codigo/]) ??
-            ""
+            "",
         ).trim();
 
         const title = String(
@@ -551,7 +551,7 @@ function normalizeNodesAny(payload, scales) {
               /nombre/,
               /label/,
             ]) ??
-            ""
+            "",
         ).trim();
 
         const depth = depthFromCode(code);
@@ -574,12 +574,12 @@ function normalizeNodesAny(payload, scales) {
               "descripción",
               "observaciones",
               "obs",
-            ]) ?? ""
+            ]) ?? "",
           ),
           parentId: null,
           viKey: coerceViKey(
             scales,
-            getAny(r, ["viKey", "vi", "nivel_importancia", "importancia"])
+            getAny(r, ["viKey", "vi", "nivel_importancia", "importancia"]),
           ),
           vcKey: coerceVcKey(scales, getAny(r, ["vcKey", "vc", "aplica"])),
           weight: coerceNumber(getAny(r, ["weight", "peso"]), 1),
@@ -605,7 +605,7 @@ function normalizeNodesAny(payload, scales) {
   if (nodes.length) {
     // Mapa de código normalizado -> id
     const byCode = new Map(
-      nodes.filter((n) => n.code).map((n) => [normalizeCode(n.code), n.id])
+      nodes.filter((n) => n.code).map((n) => [normalizeCode(n.code), n.id]),
     );
 
     nodes = nodes.map((n) => {
@@ -764,7 +764,7 @@ function classifyPriority(levels, severityPct) {
   const s = Number(severityPct);
   if (!Number.isFinite(s)) return "";
   const found = levels.find(
-    (lvl) => s >= Number(lvl.min ?? 0) && s <= Number(lvl.max ?? 100) // [min, max)
+    (lvl) => s >= Number(lvl.min ?? 0) && s <= Number(lvl.max ?? 100), // [min, max)
   );
   return found?.name || "";
 }
@@ -889,7 +889,7 @@ function editedToOriginal(edited, options = {}) {
     nodesIn.map((n) => [
       String(n.id),
       String(n.code ?? n.codigo ?? "").trim() || null,
-    ])
+    ]),
   );
 
   const levelsById = computeLevelsForExport(nodesIn, edited.scales);
@@ -1181,7 +1181,7 @@ export default function FileDetail() {
           name: p.name || p.label || `Nivel ${idx + 1}`,
           min: Number(p.min ?? 0),
           max: Number(p.max ?? 100),
-        }))
+        })),
       );
     } else {
       setPriorityLevels(DEFAULT_PRIORITY_LEVELS);
@@ -1189,11 +1189,11 @@ export default function FileDetail() {
 
     let counter = 1;
     const normalizedNodes = (Array.isArray(nds) ? nds : []).map((n) =>
-      normalizeNodeIds(n, () => counter++)
+      normalizeNodeIds(n, () => counter++),
     );
     const maxId = normalizedNodes.reduce(
       (m2, n2) => (Number.isFinite(n2.id) ? Math.max(m2, n2.id) : m2),
-      0
+      0,
     );
     nextIdRef.current = Math.max(maxId + 1, counter);
     setNodes(normalizedNodes);
@@ -1211,7 +1211,7 @@ export default function FileDetail() {
 
   const selectedNode = useMemo(
     () => nodes.find((n) => n.id === selectedId) || null,
-    [nodes, selectedId]
+    [nodes, selectedId],
   );
 
   useEffect(() => {
@@ -1283,14 +1283,14 @@ export default function FileDetail() {
     const pid = node?.parentId == null ? "__root__" : String(node.parentId);
     return nodes
       .filter(
-        (n) => (n.parentId == null ? "__root__" : String(n.parentId)) === pid
+        (n) => (n.parentId == null ? "__root__" : String(n.parentId)) === pid,
       )
       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   }
   function nextOrderForParent(parentId) {
     const pid = parentId == null ? "__root__" : String(parentId);
     const sibs = nodes.filter(
-      (n) => (n.parentId == null ? "__root__" : String(n.parentId)) === pid
+      (n) => (n.parentId == null ? "__root__" : String(n.parentId)) === pid,
     );
     const max = sibs.reduce((m2, n2) => Math.max(m2, Number(n2.order || 0)), 0);
     return max + 10;
@@ -1411,7 +1411,7 @@ export default function FileDetail() {
         if (n.id === a.id) return { ...n, order: b.order };
         if (n.id === b.id) return { ...n, order: a.order };
         return n;
-      })
+      }),
     );
     markDirty("Orden actualizado.");
   }
@@ -1429,7 +1429,7 @@ export default function FileDetail() {
     if (isDescendant(id, pid)) {
       setStatus(
         "bad",
-        "No permitido: crearías un ciclo (el padre seleccionado es descendiente)."
+        "No permitido: crearías un ciclo (el padre seleccionado es descendiente).",
       );
       return;
     }
@@ -1437,7 +1437,7 @@ export default function FileDetail() {
     updateNode(
       id,
       { parentId: pid, order: nextOrderForParent(pid) },
-      "Padre actualizado."
+      "Padre actualizado.",
     );
   }
 
@@ -1473,8 +1473,8 @@ export default function FileDetail() {
       if (n.type === TYPES.ITEM && p.type === TYPES.ITEM) {
         errors.push(
           `Jerarquía inválida: ITEM no puede tener padre ITEM → ${nodeLabel(
-            n
-          )}.`
+            n,
+          )}.`,
         );
       }
     }
@@ -1482,7 +1482,7 @@ export default function FileDetail() {
     if (errors.length) {
       setStatus(
         "bad",
-        errors[0] + (errors.length > 1 ? ` (+${errors.length - 1} más)` : "")
+        errors[0] + (errors.length > 1 ? ` (+${errors.length - 1} más)` : ""),
       );
       setConfirm({
         open: true,
@@ -1521,7 +1521,7 @@ export default function FileDetail() {
           nodes,
           priorityLevels,
         },
-        { preserveScales: !!originalHadScales }
+        { preserveScales: !!originalHadScales },
       );
 
       const payload = {
@@ -1551,7 +1551,7 @@ export default function FileDetail() {
         nodes,
         priorityLevels,
       },
-      { preserveScales: !!scales }
+      { preserveScales: !!scales },
     );
 
     downloadJSON(`${safeFilename(file?.name || "checklist")}.json`, {
@@ -1562,18 +1562,16 @@ export default function FileDetail() {
 
   async function handleExportExcel() {
     try {
+      // Siempre intentar guardar antes
+      setStatus("warn", "Guardando cambios antes de exportar…");
+      await handleSave();
+
       if (dirty) {
-        setStatus("warn", "Guardando cambios antes de exportar…");
-        try {
-          await handleSave();
-        } catch (err) {}
-        if (dirty) {
-          setStatus(
-            "bad",
-            "Exportación cancelada: primero corrige los errores y guarda los cambios."
-          );
-          return;
-        }
+        setStatus(
+          "bad",
+          "Exportación cancelada: primero corrige los errores y guarda los cambios.",
+        );
+        return;
       }
 
       setStatus("warn", "Exportando Excel…");
@@ -1605,7 +1603,7 @@ export default function FileDetail() {
     if (isDescendant(selectedNode.id, newParentId)) {
       setStatus(
         "bad",
-        "No permitido: crearías un ciclo (el padre seleccionado es descendiente)."
+        "No permitido: crearías un ciclo (el padre seleccionado es descendiente).",
       );
       return;
     }
@@ -1631,7 +1629,7 @@ export default function FileDetail() {
           active: draft.active === "true",
           observaciones: draft.observaciones || "",
         };
-      })
+      }),
     );
 
     markDirty("Cambios aplicados (inspector).");
@@ -2123,7 +2121,7 @@ export default function FileDetail() {
                         className={`${styles.iconbtn} ${styles.iconDanger}`}
                         onClick={() =>
                           setPriorityLevels((prev) =>
-                            prev.filter((_, i) => i !== idx)
+                            prev.filter((_, i) => i !== idx),
                           )
                         }
                         title="Eliminar nivel"
@@ -2407,8 +2405,8 @@ export default function FileDetail() {
                               computeSeverityPercent(
                                 scales,
                                 draft.viKey,
-                                draft.vcKey
-                              )
+                                draft.vcKey,
+                              ),
                             ) || "—"
                           }
                         />
